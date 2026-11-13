@@ -1,0 +1,313 @@
+# eckly
+
+A keyboard-driven terminal client for [Readeck](https://readeck.org), built with
+Rust and [Ratatui](https://ratatui.rs).
+
+Read your saved articles, search your library, and manage bookmarks without
+leaving the terminal.
+
+```text
+ ◆ eckly  /  Unread                                                                     demo@readeck.example.com
+┌ Library ───────────────┐┌ Bookmarks 5 ───────────────────────────────────────────────────────────────┐
+│›  ●  Unread            ││▌ ● Announcing Rust 1.97 ★ ✎                                                │
+│   ◐  Reading           ││    Rust Blog · 6 min · #rust #programming · 6 days ago                     │
+│   ★  Favorites         ││  ● A page that could not be extracted                                      │
+│   ■  Archived          ││    Example · 3 days ago                                                    │
+│   ≡  All Bookmarks     ││  ● The Art of Terminal Interfaces                                          │
+│   LABELS               ││    Example Org · 4 min · #design #tui #programming · 5 days ago            │
+│   # programming      2 ││  ● Labels, collections and saved searches                                  │
+│   # rust             2 ││    Example · 2 min · #readeck #tips · 2026-11-03                           │
+│   COLLECTIONS          ││                                                                            │
+│   ▤  Weekly reading    ││                                                                            │
+│   ▤  Research          ││                                                                            │
+└────────────────────────┘└ Newest first ──────────────────────────────────────────────────────────────┘
+ https://blog.rust-lang.org/2026/11/05/Rust-1.97.html                                  5/5 · Newest first
+  j/k move · Enter read · m read · f favorite · a archive · t labels · / search · n add · Tab filters · ? help
+```
+
+The reader turns Readeck's article HTML into readable, wrapped text with
+headings, lists, quotes and code blocks:
+
+```text
+● Announcing Rust 1.97 ★
+Rust Blog  ·  The Rust Team  ·  6 days ago  ·  6 min read  ·  1450 words  ·  #rust #programming
+https://blog.rust-lang.org/2026/11/05/Rust-1.97.html
+┌──────────────────────────────────────────────────────────────────────────────────────────▲
+│ Announcing Rust 1.97                                                                     █
+│                                                                                          █
+│ The Rust team is happy to announce a new version of Rust: 1.97.0. Rust is a programming  █
+│ language empowering everyone to build reliable and efficient software.                   █
+│                                                                                          █
+│ What's in 1.97.0                                                                         █
+│                                                                                          █
+│ • Faster incremental compilation for large workspaces.                                   █
+│ • New convenience methods on Option and Result.                                          █
+│ • Improved diagnostics for trait errors.                                                 █
+│                                                                                          █
+│ │ Rust's goal is to make it easy to write reliable software that is also fast.           █
+│                                                                                          █
+│ Example                                                                                  █
+│                                                                                          █
+│   fn main() {                                                                            █
+│       let greeting = "Hello, Readeck!";                                                  █
+│       println!("{greeting}");                                                            █
+│   }                                                                                      █
+└──────────────────────────────────────────────────────────────────────────────────────────▼
+  j/k scroll · Space page · g/G top/bottom · m read · f favorite · a archive · o browser · Esc back
+  38% read · line 12 of 31
+```
+
+## Features
+
+- **Browse** the inbox (all non-archived bookmarks, including finished ones),
+  reading progress, favorites and archives, or filter by label or collection.
+- **Search** your library with Readeck's full-text search.
+- **Read** extracted articles in a comfortable, scrollable reader. Plain text is
+  reflowed to the terminal width; headings, lists, quotes, code and images are
+  rendered inline. Images use truecolor half blocks and are fetched from
+  Readeck's media route.
+- **Manage** bookmarks: mark read/unread, favorite, archive, edit labels,
+  title, and short notes, or delete with a confirmation.
+- **Bulk edit** a selection: press `Space` to select bookmarks, then apply
+  `m`, `f`, `a`, `t` or `D` to the whole selection.
+- **Save links** directly from the TUI.
+- **Progress tracking**: the reader resumes at the bookmark’s saved percentage
+  and sends the updated position to Readeck when you leave.
+- **Lazy pagination** and live sorting, without blocking the UI.
+- **Interactive setup** on first launch; credentials are stored with `0600`
+  permissions.
+- **Themes** — all 39 built-in [opaline](https://crates.io/crates/opaline)
+  themes, with a live-preview picker.
+- **Label completion** — `Tab` cycles matching labels in the label editor.
+- Responsive layout, spinner/progress feedback, error messages, and a complete
+  help overlay (`?`).
+
+## Installation
+
+Requires Rust 1.85 or newer.
+
+```sh
+cargo install --git https://github.com/gollyhatch/eckly
+```
+
+Or from a local checkout:
+
+```sh
+cd eckly
+cargo install --path .
+```
+
+Or build a binary with `cargo build --release` (the result is
+`target/release/eckly`).
+
+## Configuration
+
+On first launch, `eckly` asks for your Readeck server URL and either an API token
+or OAuth device login (`Ctrl+O`). To use a token, create one in Readeck under
+**Settings → API tokens**. The configuration is saved to:
+
+- `$XDG_CONFIG_HOME/eckly/config.toml`, or
+- `~/.config/eckly/config.toml` when `XDG_CONFIG_HOME` is not set.
+
+The file contains the server URL, token and optional theme, and is written with
+mode `0600` on Unix:
+
+```toml
+server = "https://readeck.example.com"
+token = "your-api-token"
+theme = "catppuccin-mocha"
+images = true
+text_width = 100
+text_align = "center"
+```
+
+`images` controls whether inline article images are rendered; it defaults to
+`true`. Pressing `i` in the reader toggles images for the current session.
+
+`text_width` sets the maximum width of the reading column before text wraps.
+`0` (the default) uses the full available width. When the terminal is wider than
+`text_width`, `text_align = "center"` (the default) centers the column; set
+`text_align = "left"` to align it with the left edge instead. Press `A` in the
+reader to toggle alignment for the current session.
+
+Credentials can also be supplied per run:
+
+```sh
+# Command line arguments
+eckly --server https://readeck.example.com --token "$READECK_TOKEN"
+
+# Environment variables
+READECK_URL=https://readeck.example.com READECK_TOKEN=... eckly
+
+# Alternative token variable
+READECK_API_TOKEN=... eckly
+
+# A different config file
+eckly --config ~/.config/eckly/work.toml
+
+# Choose a theme without editing the config
+eckly --theme gruvbox-dark
+ECKLY_THEME=catppuccin-mocha eckly
+```
+
+Themes come from opaline’s 39 built-in themes, including Ayu, Catppuccin,
+Dracula, Everforest, Gruvbox, Kanagawa, Nord, One, Rose Pine, Solarized,
+Tokyo Night and the SilkCircuit family. **Ayu Dark** is the default theme. Run
+`eckly --list-themes` to see every ID and display name. The theme is resolved from `--theme`, then `ECKLY_THEME`,
+then the config file. Press `Ctrl+T` anywhere in the app to open a theme picker:
+`j`/`k` preview the highlighted theme live, `Enter` applies it for the current
+session, and `Esc` cancels. The old `default`, `gruvbox` and `catppuccin` names
+are still accepted as aliases.
+
+Precedence: command line arguments, then environment variables, then the
+configuration file. Credentials supplied via arguments or environment are not
+written back to the configuration file.
+
+The token needs access to bookmarks and (for the username in the title bar) the
+profile. If the token is restricted, eckly still works with whatever endpoints
+are permitted and reports `403` errors in the status bar.
+
+### OAuth
+
+On the setup screen, enter the server URL and press `Ctrl+O` instead of providing
+an API token. eckly registers an ephemeral OAuth client, requests a device code,
+and displays a verification URL and user code. After you approve the request in
+your browser, eckly polls Readeck and stores the resulting access token in the
+config file like a regular API token.
+
+The device flow requests `bookmarks:read`, `bookmarks:write` and `profile:read`
+scopes. API tokens remain available for scripted setups, `--token`, and
+environment-based configuration.
+
+## Keys
+
+`?` opens a full help overlay at any time. `Ctrl+C` quits immediately.
+
+### Bookmark list
+
+The **Unread** view is an inbox: it shows all bookmarks that are not archived,
+including ones you have finished.
+
+`Space` toggles a bookmark for bulk actions. When a selection exists, `m`, `f`,
+`a`, `t` and `D` apply to every selected bookmark; otherwise they act on the
+highlighted bookmark. Changing the filter, search or sort clears the selection.
+Opening the reader keeps it. Successful `m`/`f`/`a`/`t` actions keep the
+selection unless the updated bookmarks leave the current filter. Deleting removes
+the deleted bookmarks from the selection. Title and note editing still act on
+the highlighted bookmark only. Deleting a selection always shows a confirmation
+first.
+
+| Key | Action |
+| --- | --- |
+| `j` / `↓`, `k` / `↑` | Move selection |
+| `Space` | Select / deselect the highlighted bookmark |
+| `Ctrl+a` | Select all bookmarks currently loaded in the list |
+| `PgDn` / `PgUp` | Move one page |
+| `Ctrl+d` / `Ctrl+u` | Move half a page |
+| `g` / `G` | First / last bookmark |
+| `Enter` / `l` / `→` | Open the reader |
+| `Tab` / `h` / `←` | Focus the filter sidebar |
+| `Esc` | Clear search, then selection; otherwise focus the Library panel |
+| `m` | Toggle read / unread |
+| `f` | Toggle favorite |
+| `a` | Archive / restore |
+| `t` | Edit labels (comma separated) |
+| `T` | Edit title |
+| `N` | Edit note |
+| `D` | Delete highlighted/selected bookmarks (with confirmation) |
+| `o` | Open the original page in your browser |
+| `/` | Search (empty query clears; `Ctrl+w` deletes the previous word) |
+| `s` / `S` | Cycle sort order forward / backward |
+| `n` | Save a new link |
+| `r` | Refresh bookmarks, labels, collections and profile |
+| `q` | Quit |
+
+### Filter sidebar
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` | Move between filters |
+| `PgUp` / `PgDn` | Move one page |
+| `Ctrl+u` / `Ctrl+d` | Move half a page |
+| `g` / `G` | First / last filter |
+| `/` | Filter labels and collections |
+| `Enter` / `l` / `→` | Apply the selected filter |
+| `Tab` | Return to the bookmark list |
+| `Esc` / `h` / `←` | Clear the library filter, then return |
+
+While the library filter is active, type to narrow the list, use `↑`/`↓` to
+choose a result, and press `Enter` to apply it. `Esc` clears the filter.
+
+Selecting a label shows every bookmark carrying it, regardless of reading
+progress or archive status.
+
+### Reader
+
+| Key | Action |
+| --- | --- |
+| `j` / `↓`, `k` / `↑` | Scroll one line |
+| `Space` | Scroll to the next paragraph |
+| `PgDn` | Page down |
+| `PgUp` / `b` | Page up |
+| `Ctrl+d`, `Ctrl+u` | Half page down / up |
+| `g` / `G` | Top / bottom |
+| `m`, `f`, `a` | Toggle read, favorite, archive |
+| `t`, `T`, `N` | Edit labels, title, note |
+| `D` | Delete the bookmark (with confirmation) |
+| `i` | Enable / disable inline images |
+| `A` | Toggle centered / left-aligned text |
+| `o` | Open in browser |
+| `r` | Retry loading the article |
+| `Esc` / `q` | Back to the list |
+
+### General
+
+| Key | Action |
+| --- | --- |
+| `?` | Toggle help overlay |
+| `Ctrl+T` | Choose color theme |
+| `Ctrl+C` | Quit eckly |
+
+### Text fields
+
+Text entry fields (search, labels, title, note, new bookmark and setup) support:
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+a` | Move cursor to the beginning |
+| `Ctrl+e` | Move cursor to the end |
+| `Ctrl+w` | Delete the previous word |
+| `Tab` | Complete / cycle labels in the label editor |
+
+## Notes and limitations
+
+- Images are rendered as truecolor half blocks. Terminals without truecolor
+  will approximate the colors, and animated images show their first frame.
+  Up to 12 images are loaded per article. Embedded videos and complex tables
+  are flattened; `o` opens the original page when needed.
+- Notes are edited on a single line. Notes containing multiple lines should be
+  edited in the Readeck web UI to avoid flattening them.
+- Label names containing commas cannot be entered from the TUI.
+- Deleting a bookmark is immediate after confirmation. Readeck's archive is a
+  safer option if you may want the article later.
+- The client targets the Readeck HTTP API (`/api/bookmarks`,
+  `/api/bookmarks/{id}/article`, labels, collections and profile). It has no
+  offline cache.
+
+## Development
+
+```sh
+cargo test       # unit tests, HTML extraction, API request/response tests
+cargo clippy --all-targets
+cargo fmt
+```
+
+The code is split into a small API client (`src/api.rs`), domain models
+(`src/models.rs`), the application state machine (`src/app.rs`), HTML-to-text
+conversion (`src/article.rs`), and the Ratatui views (`src/ui/`). The UI never
+performs blocking network calls; API work runs in Tokio tasks and reports back
+through an event channel.
+
+## License
+
+GNU General Public License v3.0 or later. See [LICENSE](LICENSE).

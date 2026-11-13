@@ -1,0 +1,5 @@
+/target
+/.research
+*.swp
+*.swo
+.DS_Store
