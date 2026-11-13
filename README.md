@@ -6,56 +6,12 @@ Rust and [Ratatui](https://ratatui.rs).
 Read your saved articles, search your library, and manage bookmarks without
 leaving the terminal.
 
-```text
- ◆ eckly  /  Unread                                                                     demo@readeck.example.com
-┌ Library ───────────────┐┌ Bookmarks 5 ───────────────────────────────────────────────────────────────┐
-│›  ●  Unread            ││▌ ● Announcing Rust 1.97 ★ ✎                                                │
-│   ◐  Reading           ││    Rust Blog · 6 min · #rust #programming · 6 days ago                     │
-│   ★  Favorites         ││  ● A page that could not be extracted                                      │
-│   ■  Archived          ││    Example · 3 days ago                                                    │
-│   ≡  All Bookmarks     ││  ● The Art of Terminal Interfaces                                          │
-│   LABELS               ││    Example Org · 4 min · #design #tui #programming · 5 days ago            │
-│   # programming      2 ││  ● Labels, collections and saved searches                                  │
-│   # rust             2 ││    Example · 2 min · #readeck #tips · 2026-11-03                           │
-│   COLLECTIONS          ││                                                                            │
-│   ▤  Weekly reading    ││                                                                            │
-│   ▤  Research          ││                                                                            │
-└────────────────────────┘└ Newest first ──────────────────────────────────────────────────────────────┘
- https://blog.rust-lang.org/2026/11/05/Rust-1.97.html                                  5/5 · Newest first
-  j/k move · Enter read · m read · f favorite · a archive · t labels · / search · n add · Tab filters · ? help
-```
+![eckly bookmark list using the Ayu Dark theme](screenshots/list.png)
 
 The reader turns Readeck's article HTML into readable, wrapped text with
-headings, lists, quotes and code blocks:
+headings, lists, quotes, code blocks and inline images:
 
-```text
-● Announcing Rust 1.97 ★
-Rust Blog  ·  The Rust Team  ·  6 days ago  ·  6 min read  ·  1450 words  ·  #rust #programming
-https://blog.rust-lang.org/2026/11/05/Rust-1.97.html
-┌──────────────────────────────────────────────────────────────────────────────────────────▲
-│ Announcing Rust 1.97                                                                     █
-│                                                                                          █
-│ The Rust team is happy to announce a new version of Rust: 1.97.0. Rust is a programming  █
-│ language empowering everyone to build reliable and efficient software.                   █
-│                                                                                          █
-│ What's in 1.97.0                                                                         █
-│                                                                                          █
-│ • Faster incremental compilation for large workspaces.                                   █
-│ • New convenience methods on Option and Result.                                          █
-│ • Improved diagnostics for trait errors.                                                 █
-│                                                                                          █
-│ │ Rust's goal is to make it easy to write reliable software that is also fast.           █
-│                                                                                          █
-│ Example                                                                                  █
-│                                                                                          █
-│   fn main() {                                                                            █
-│       let greeting = "Hello, Readeck!";                                                  █
-│       println!("{greeting}");                                                            █
-│   }                                                                                      █
-└──────────────────────────────────────────────────────────────────────────────────────────▼
-  j/k scroll · Space page · g/G top/bottom · m read · f favorite · a archive · o browser · Esc back
-  38% read · line 12 of 31
-```
+![eckly reading view using the Ayu Dark theme](screenshots/reader.png)
 
 ## Features
 
