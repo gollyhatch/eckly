@@ -28,6 +28,8 @@ headings, lists, quotes, code blocks and inline images:
 - **Bulk edit** a selection: press `Space` to select bookmarks, then apply
   `m`, `f`, `a`, `t` or `D` to the whole selection.
 - **Save links** directly from the TUI.
+- **Offline cache**: bookmark metadata and article text are cached locally, so
+  cached bookmarks remain browsable and readable when Readeck is unreachable.
 - **Progress tracking**: the reader resumes at the bookmark’s saved percentage
   and sends the updated position to Readeck when you leave.
 - **Lazy pagination** and live sorting, without blocking the UI.
@@ -135,6 +137,64 @@ config file like a regular API token.
 The device flow requests `bookmarks:read`, `bookmarks:write` and `profile:read`
 scopes. API tokens remain available for scripted setups, `--token`, and
 environment-based configuration.
+
+### Offline cache
+
+eckly caches bookmark metadata, labels, collections, the user profile and
+article HTML under:
+
+- `$XDG_CACHE_HOME/eckly`, or
+- `~/.cache/eckly` when `XDG_CACHE_HOME` is not set.
+
+When Readeck cannot be reached, the header shows **offline** and eckly falls
+back to the cached bookmark list. Filters, metadata search and sorting work
+locally; collection views require a connection. Opening a cached bookmark loads
+its saved article text.
+
+Changes made offline — read state, favorites, archive state, labels, title, note
+and deletion — are applied locally and stored in a pending queue. The header
+shows the number of pending changes. The queue is sent automatically when
+Readeck becomes reachable again, including on the next online launch. Creating
+new bookmarks still requires a connection.
+
+Article images and full-text search are not cached; offline search matches
+titles, descriptions, notes, URLs and labels. The cache is not automatically
+evicted.
+
+Start the TUI in forced offline mode with:
+
+```sh
+eckly --offline
+```
+
+This never contacts Readeck: it browses the local cache and opens cached
+articles. Bookmark changes are queued locally and synced on the next online
+launch. `r` reloads the cache from disk, which is useful after running
+`eckly sync` in another terminal.
+
+### Sync for offline reading
+
+The `sync` subcommand downloads bookmark metadata and article HTML without
+starting the TUI:
+
+```sh
+eckly sync --unread       # the Unread list (all non-archived bookmarks)
+eckly sync --favorites    # favorite bookmarks
+eckly sync --archived     # archived bookmarks
+eckly sync --all          # everything
+```
+
+Flags can be combined to sync the union of several lists:
+
+```sh
+eckly sync --unread --favorites
+```
+
+Pending offline changes are uploaded first. The command uses the same config
+file, `--server`/`--token`, or environment variables as the TUI. In an
+interactive terminal it displays progress bars via `indicatif`; when
+stdout/stderr are not terminals (for example from cron), it prints nothing on
+success and only reports errors.
 
 ## Keys
 

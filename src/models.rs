@@ -15,7 +15,7 @@ where
 }
 
 /// A bookmark as returned by `GET /api/bookmarks` or `GET /api/bookmarks/{id}`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Bookmark {
     #[serde(default)]
     pub id: String,
@@ -174,7 +174,7 @@ impl ReadStatus {
 ///
 /// The API treats every field as optional. Fields set to `None` are omitted
 /// from the JSON payload entirely.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BookmarkPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -213,7 +213,7 @@ impl BookmarkPatch {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Label {
     #[serde(default)]
     pub name: String,
@@ -221,7 +221,7 @@ pub struct Label {
     pub count: usize,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Collection {
     #[serde(default)]
     pub id: String,
@@ -233,13 +233,13 @@ pub struct Collection {
     pub is_deleted: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Profile {
     #[serde(default)]
     pub user: User,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct User {
     #[serde(default)]
     pub username: String,
@@ -272,6 +272,25 @@ fn quote_label(name: &str) -> String {
 }
 
 impl Filter {
+    /// Local membership test used for cached bookmarks and post-update
+    /// pruning. Collection membership is only known by the server.
+    pub fn matches(&self, bookmark: &Bookmark) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unread => !bookmark.is_archived,
+            Self::Reading => {
+                (1..100).contains(&bookmark.read_progress)
+                    && !bookmark.is_archived
+            }
+            Self::Marked => bookmark.is_marked && !bookmark.is_archived,
+            Self::Archived => bookmark.is_archived,
+            Self::Label(name) => {
+                bookmark.labels.iter().any(|label| label == name)
+            }
+            Self::Collection { .. } => true,
+        }
+    }
+
     pub fn title(&self) -> String {
         match self {
             Self::All => "All Bookmarks".into(),

@@ -78,6 +78,15 @@ pub enum ApiEvent {
         seq: u64,
         result: Result<String, ApiError>,
     },
+    PendingSynced(PendingSyncResult),
+}
+
+#[derive(Debug, Default)]
+pub struct PendingSyncResult {
+    pub updated: Vec<String>,
+    pub deleted: Vec<String>,
+    pub errors: Vec<String>,
+    pub network_error: bool,
 }
 
 const TICK: Duration = Duration::from_millis(120);

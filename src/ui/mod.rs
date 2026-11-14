@@ -114,6 +114,22 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::new().fg(theme::dim()),
         ));
     }
+    if app.offline {
+        left.push(Span::styled(
+            "  offline",
+            Style::new()
+                .fg(theme::accent_alt())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if app.pending_changes() > 0 {
+        left.push(Span::styled(
+            format!("  {} pending", app.pending_changes()),
+            Style::new()
+                .fg(theme::purple())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     frame.render_widget(
         Paragraph::new(Line::from(left))
             .style(Style::new().bg(theme::bg_bar())),

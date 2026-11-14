@@ -76,6 +76,10 @@ impl ApiError {
     pub fn is_no_article(&self) -> bool {
         matches!(self, Self::NoArticle)
     }
+
+    pub fn is_network(&self) -> bool {
+        matches!(self, Self::Request(_))
+    }
 }
 
 /// Async client for the Readeck HTTP API.

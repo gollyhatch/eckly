@@ -11,8 +11,9 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{ApiError, OAuthDevice, OAuthPoll, ReadeckClient};
 use crate::article::{Article, parse_article};
+use crate::cache::Cache;
 use crate::config::{Config, normalize_server};
-use crate::event::{ApiEvent, Event};
+use crate::event::{ApiEvent, Event, PendingSyncResult};
 use crate::input::TextInput;
 use crate::models::{
     Bookmark, BookmarkPatch, BookmarkQuery, Collection, Filter, Label, Profile,
@@ -502,21 +503,36 @@ pub struct App {
     pub tick: u64,
     pub quit: bool,
     pub images_enabled: bool,
+    pub offline: bool,
+    pub offline_mode: bool,
 
+    cache: Option<Cache>,
     tx: UnboundedSender<Event>,
     list_seq: u64,
     pending_select: Option<String>,
     oauth_seq: u64,
+    pending_sync_running: bool,
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(
         config: Config,
         config_path: PathBuf,
         tx: UnboundedSender<Event>,
     ) -> Self {
+        Self::with_cache(config, config_path, tx, None, false)
+    }
+
+    pub fn with_cache(
+        config: Config,
+        config_path: PathBuf,
+        tx: UnboundedSender<Event>,
+        cache: Option<Cache>,
+        offline_mode: bool,
+    ) -> Self {
         let images_enabled = config.images;
-        Self {
+        let mut app = Self {
             screen: Screen::Setup,
             focus: Focus::List,
             config,
@@ -550,15 +566,59 @@ impl App {
             tick: 0,
             quit: false,
             images_enabled,
+            offline: offline_mode,
+            offline_mode,
+            cache,
             tx,
             list_seq: 0,
             pending_select: None,
             oauth_seq: 0,
+            pending_sync_running: false,
+        };
+        app.preload_cache();
+        app
+    }
+
+    fn preload_cache(&mut self) {
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        let labels = cache.labels();
+        let collections = cache.collections();
+        let profile = cache.profile();
+        let bookmarks =
+            cache.local_bookmarks(&self.filter, &self.search, self.sort);
+
+        self.labels = labels;
+        self.collections = collections;
+        if let Some(profile) = profile {
+            self.profile = Some(profile);
+        }
+        self.total = bookmarks.len();
+        self.bookmarks = bookmarks;
+        self.list_state
+            .select((!self.bookmarks.is_empty()).then_some(0));
+        self.rebuild_sidebar();
+    }
+
+    fn reload_cache(&mut self) {
+        let Some(dir) =
+            self.cache.as_ref().map(|cache| cache.dir().to_path_buf())
+        else {
+            return;
+        };
+        if let Ok(cache) = Cache::load(dir) {
+            self.cache = Some(cache);
+            self.preload_cache();
         }
     }
 
     /// Connect using saved/environment credentials or present the setup form.
     pub fn bootstrap(&mut self) {
+        if self.offline_mode {
+            self.enter_offline();
+            return;
+        }
         if !self.config.has_credentials() {
             self.show_setup(None);
             return;
@@ -573,6 +633,22 @@ impl App {
         }
     }
 
+    fn enter_offline(&mut self) {
+        self.screen = Screen::Main;
+        self.setup = None;
+        self.focus = Focus::List;
+        self.offline = true;
+        self.show_cached_bookmarks(false);
+        self.rebuild_sidebar();
+        if self.bookmarks.is_empty() {
+            self.list_error = Some(
+                "Offline mode — cache is empty. Run `eckly sync …` to populate it."
+                    .into(),
+            );
+        }
+        self.toast_info("Offline mode — using local cache");
+    }
+
     fn enter_main(&mut self) {
         self.screen = Screen::Main;
         self.setup = None;
@@ -584,6 +660,7 @@ impl App {
             self.request_profile();
         }
         self.rebuild_sidebar();
+        self.flush_pending_changes();
     }
 
     fn show_setup(&mut self, error: Option<String>) {
@@ -1379,6 +1456,20 @@ impl App {
     }
 
     fn request_bookmarks(&mut self, append: bool, preserve_selection: bool) {
+        if self.offline_mode {
+            if !append {
+                self.list_seq = self.list_seq.wrapping_add(1);
+                self.pending_select = if preserve_selection {
+                    self.selected_bookmark().map(|bookmark| bookmark.id)
+                } else {
+                    None
+                };
+            }
+            self.loading_list = false;
+            self.loading_more = false;
+            self.show_cached_bookmarks(false);
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1399,9 +1490,6 @@ impl App {
             if !preserve_selection {
                 self.selected_ids.clear();
             }
-            self.bookmarks.clear();
-            self.total = 0;
-            self.list_state = ListState::default();
             self.loading_list = true;
             self.loading_more = false;
             self.list_error = None;
@@ -1475,6 +1563,33 @@ impl App {
             self.config.text_width,
             !self.config.text_align.trim().eq_ignore_ascii_case("left"),
         );
+        if self.offline_mode {
+            let cached = self
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.read_article(&bookmark.id));
+            if let Some(html) = cached {
+                reader.set_article(parse_article(&html));
+            } else if bookmark
+                .description
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+                || bookmark
+                    .note
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
+            {
+                reader.set_article(fallback_article(&bookmark));
+            } else {
+                reader.loading = false;
+                reader.error = Some(
+                    "Offline mode: no cached copy of this article is available."
+                        .into(),
+                );
+            }
+            self.reader = Some(reader);
+            return;
+        }
         if bookmark.has_article {
             self.reader = Some(reader);
             self.request_article(&bookmark.id);
@@ -1494,10 +1609,18 @@ impl App {
         }
         let id = id.to_string();
         let tx = self.tx.clone();
+        let cache_dir =
+            self.cache.as_ref().map(|cache| cache.dir().to_path_buf());
         let requested = id.clone();
         tokio::spawn(async move {
             let result = match client.article(&requested).await {
-                Ok(html) => Ok(parse_article(&html)),
+                Ok(html) => {
+                    if let Some(dir) = &cache_dir {
+                        let _ =
+                            Cache::write_article_to_dir(dir, &requested, &html);
+                    }
+                    Ok(parse_article(&html))
+                }
                 Err(err) => Err(err),
             };
             let _ = tx.send(Event::api(ApiEvent::Article { id, result }));
@@ -1652,6 +1775,17 @@ impl App {
     // Bookmark actions
     // ------------------------------------------------------------------
 
+    fn require_online(&mut self) -> bool {
+        if self.offline_mode || self.offline {
+            self.toast_error(
+                "Adding bookmarks requires a connection to Readeck.",
+            );
+            false
+        } else {
+            true
+        }
+    }
+
     fn toggle_read(&mut self) {
         let targets = self.action_targets();
         if targets.is_empty() {
@@ -1745,6 +1879,22 @@ impl App {
         message: String,
         quiet: bool,
     ) {
+        if self.offline_mode || self.offline {
+            let count = ids.len();
+            self.apply_patch_to_ids(&ids, &patch);
+            if let Some(cache) = &mut self.cache {
+                for id in &ids {
+                    cache.queue_patch(id, &patch);
+                }
+                let _ = cache.save();
+            }
+            if !quiet {
+                self.toast_info(format!(
+                    "Offline — {count} change(s) saved locally"
+                ));
+            }
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1774,6 +1924,17 @@ impl App {
         if patch.is_empty() {
             return;
         }
+        if self.offline_mode || self.offline {
+            self.apply_patch(&id, &patch);
+            if let Some(cache) = &mut self.cache {
+                cache.queue_patch(&id, &patch);
+                let _ = cache.save();
+            }
+            if !quiet {
+                self.toast_info("Offline — change saved locally");
+            }
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1789,6 +1950,22 @@ impl App {
                 result,
             }));
         });
+    }
+
+    fn delete_offline(&mut self, ids: Vec<String>) {
+        let count = ids.len();
+        self.remove_bookmarks(&ids);
+        if let Some(cache) = &mut self.cache {
+            for id in &ids {
+                cache.queue_delete(id);
+            }
+            let _ = cache.save();
+        }
+        if count == 1 {
+            self.toast_info("Offline — deletion queued");
+        } else {
+            self.toast_info(format!("Offline — {count} deletions queued"));
+        }
     }
 
     fn confirm_delete(&mut self) {
@@ -1831,6 +2008,10 @@ impl App {
     }
 
     fn start_delete(&mut self, ids: Vec<String>) {
+        if self.offline_mode || self.offline {
+            self.delete_offline(ids);
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1879,6 +2060,9 @@ impl App {
     }
 
     fn open_new_bookmark(&mut self) {
+        if !self.require_online() {
+            return;
+        }
         self.modal = Some(Modal::Input(InputModal::new(
             "Add bookmark",
             "URL to save in Readeck",
@@ -2119,6 +2303,9 @@ impl App {
     }
 
     fn create_bookmark(&mut self, input: &str) {
+        if !self.require_online() {
+            return;
+        }
         let url = match normalize_url(input) {
             Ok(url) => url,
             Err(message) => {
@@ -2148,7 +2335,90 @@ impl App {
         self.toast_info(format!("Sort: {}", self.sort.label()));
     }
 
+    fn flush_pending_changes(&mut self) {
+        if self.offline_mode || self.offline || self.pending_sync_running {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        let updates = cache.pending_updates();
+        let deletes = cache.pending_deletes();
+        if updates.is_empty() && deletes.is_empty() {
+            return;
+        }
+        self.pending_sync_running = true;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let mut result = PendingSyncResult::default();
+            for (id, patch) in updates {
+                match client.update_bookmark(&id, &patch).await {
+                    Ok(()) => result.updated.push(id),
+                    Err(err) => {
+                        if err.is_network() {
+                            result.network_error = true;
+                            break;
+                        }
+                        result.errors.push(format!("{id}: {err}"));
+                    }
+                }
+            }
+            if !result.network_error {
+                for id in deletes {
+                    match client.delete_bookmark(&id).await {
+                        Ok(()) => result.deleted.push(id),
+                        Err(err) => {
+                            if err.is_network() {
+                                result.network_error = true;
+                                break;
+                            }
+                            result.errors.push(format!("{id}: {err}"));
+                        }
+                    }
+                }
+            }
+            let _ = tx.send(Event::api(ApiEvent::PendingSynced(result)));
+        });
+    }
+
+    fn handle_pending_synced(&mut self, result: PendingSyncResult) {
+        self.pending_sync_running = false;
+        if let Some(cache) = &mut self.cache {
+            for id in &result.updated {
+                cache.remove_pending_update(id);
+            }
+            for id in &result.deleted {
+                cache.remove_pending_delete(id);
+            }
+            let _ = cache.save();
+        }
+        if result.network_error {
+            self.offline = true;
+        }
+        let synced = result.updated.len() + result.deleted.len();
+        if synced > 0 {
+            self.toast_success(format!("Synced {synced} offline change(s)"));
+            self.request_bookmarks(false, true);
+        }
+        if let Some(error) = result.errors.first() {
+            let extra = result.errors.len().saturating_sub(1);
+            self.toast_error(if extra > 0 {
+                format!("{error} (+{extra} more)")
+            } else {
+                error.clone()
+            });
+        }
+    }
+
     fn refresh_all(&mut self) {
+        if self.offline_mode {
+            self.reload_cache();
+            self.toast_info("Offline mode — reloaded local cache");
+            return;
+        }
         self.request_bookmarks(false, true);
         self.request_labels();
         self.request_collections();
@@ -2344,13 +2614,21 @@ impl App {
             } => self.handle_bookmarks(seq, append, result),
             ApiEvent::Labels(result) => match result {
                 Ok(labels) => {
+                    self.offline = false;
                     self.labels = labels
                         .into_iter()
                         .filter(|label| !label.name.trim().is_empty())
                         .collect();
+                    if let Some(cache) = &mut self.cache {
+                        cache.set_labels(self.labels.clone());
+                        let _ = cache.save();
+                    }
                     self.rebuild_sidebar();
                 }
                 Err(err) => {
+                    if err.is_network() {
+                        self.offline = true;
+                    }
                     if !self.handle_unauthorized(&err) {
                         self.toast_error(err.to_string());
                     }
@@ -2358,10 +2636,18 @@ impl App {
             },
             ApiEvent::Collections(result) => match result {
                 Ok(collections) => {
+                    self.offline = false;
                     self.collections = collections;
+                    if let Some(cache) = &mut self.cache {
+                        cache.set_collections(self.collections.clone());
+                        let _ = cache.save();
+                    }
                     self.rebuild_sidebar();
                 }
                 Err(err) => {
+                    if err.is_network() {
+                        self.offline = true;
+                    }
                     if !self.handle_unauthorized(&err) {
                         self.toast_error(err.to_string());
                     }
@@ -2370,10 +2656,20 @@ impl App {
             ApiEvent::Profile(result) => {
                 match result {
                     Ok(profile) => {
+                        self.offline = false;
                         self.profile = Some(profile);
                         self.profile_denied = false;
+                        if let Some(profile) = &self.profile {
+                            if let Some(cache) = &mut self.cache {
+                                cache.set_profile(profile.clone());
+                                let _ = cache.save();
+                            }
+                        }
                     }
                     Err(err) => {
+                        if err.is_network() {
+                            self.offline = true;
+                        }
                         if err.status() == Some(403) {
                             self.profile_denied = true;
                             self.toast_info("API token has no profile access; username hidden.");
@@ -2409,11 +2705,53 @@ impl App {
                         }
                     }
                     Err(err) => {
-                        if !self.handle_unauthorized(&err) {
-                            if let Some(reader) = &mut self.reader {
+                        if self.handle_unauthorized(&err) {
+                            return;
+                        }
+                        if err.is_network() {
+                            self.offline = true;
+                            let cached = self
+                                .cache
+                                .as_ref()
+                                .and_then(|cache| cache.read_article(&id));
+                            let bookmark = self
+                                .reader
+                                .as_ref()
+                                .map(|reader| reader.bookmark.clone());
+                            if let Some(html) = cached {
+                                if let Some(reader) = &mut self.reader {
+                                    reader.set_article(parse_article(&html));
+                                }
+                                self.toast_info(
+                                    "Offline — loaded cached article",
+                                );
+                            } else if let Some(bookmark) =
+                                bookmark.filter(|bookmark| {
+                                    bookmark.description.as_deref().is_some_and(
+                                        |text| !text.trim().is_empty(),
+                                    ) || bookmark.note.as_deref().is_some_and(
+                                        |text| !text.trim().is_empty(),
+                                    )
+                                })
+                            {
+                                if let Some(reader) = &mut self.reader {
+                                    reader.set_article(fallback_article(
+                                        &bookmark,
+                                    ));
+                                }
+                                self.toast_info(
+                                    "Offline — showing saved description/note",
+                                );
+                            } else if let Some(reader) = &mut self.reader {
                                 reader.loading = false;
-                                reader.error = Some(article_error(&err));
+                                reader.error = Some(
+                                    "Offline and no cached copy of this article is available."
+                                        .into(),
+                                );
                             }
+                        } else if let Some(reader) = &mut self.reader {
+                            reader.loading = false;
+                            reader.error = Some(article_error(&err));
                         }
                     }
                 }
@@ -2453,7 +2791,17 @@ impl App {
                     }
                 }
                 Err(err) => {
-                    if !self.handle_unauthorized(&err) {
+                    if err.is_network() {
+                        self.offline = true;
+                        self.apply_patch(&id, &patch);
+                        if let Some(cache) = &mut self.cache {
+                            cache.queue_patch(&id, &patch);
+                            let _ = cache.save();
+                        }
+                        if !quiet {
+                            self.toast_info("Offline — change saved locally");
+                        }
+                    } else if !self.handle_unauthorized(&err) {
                         self.toast_error(err.to_string());
                         self.request_bookmarks(false, true);
                     }
@@ -2473,7 +2821,22 @@ impl App {
                     }
                 }
                 Err(err) => {
-                    if !self.handle_unauthorized(&err) {
+                    if err.is_network() {
+                        self.offline = true;
+                        self.apply_patch_to_ids(&ids, &patch);
+                        if let Some(cache) = &mut self.cache {
+                            for id in &ids {
+                                cache.queue_patch(id, &patch);
+                            }
+                            let _ = cache.save();
+                        }
+                        if !quiet {
+                            self.toast_info(format!(
+                                "Offline — {} change(s) saved locally",
+                                ids.len()
+                            ));
+                        }
+                    } else if !self.handle_unauthorized(&err) {
                         self.toast_error(err.to_string());
                         self.request_bookmarks(false, true);
                     }
@@ -2496,7 +2859,10 @@ impl App {
                     self.toast_success("Bookmark deleted");
                 }
                 Err(err) => {
-                    if !self.handle_unauthorized(&err) {
+                    if err.is_network() {
+                        self.offline = true;
+                        self.delete_offline(vec![id]);
+                    } else if !self.handle_unauthorized(&err) {
                         self.toast_error(err.to_string());
                     }
                 }
@@ -2514,7 +2880,10 @@ impl App {
                     }
                 }
                 Err(err) => {
-                    if !self.handle_unauthorized(&err) {
+                    if err.is_network() {
+                        self.offline = true;
+                        self.delete_offline(ids);
+                    } else if !self.handle_unauthorized(&err) {
                         self.toast_error(err.to_string());
                         self.request_bookmarks(false, true);
                     }
@@ -2535,6 +2904,9 @@ impl App {
                         }
                     }
                 }
+            }
+            ApiEvent::PendingSynced(result) => {
+                self.handle_pending_synced(result);
             }
             ApiEvent::OAuthToken { seq, result } => {
                 if seq != self.oauth_seq {
@@ -2591,6 +2963,13 @@ impl App {
 
         match result {
             Ok(page) => {
+                let was_offline = self.offline;
+                self.offline = false;
+                self.list_error = None;
+                if let Some(cache) = &mut self.cache {
+                    cache.upsert_bookmarks(&page.items);
+                    let _ = cache.save();
+                }
                 if append {
                     for bookmark in page.items {
                         if !self
@@ -2618,12 +2997,25 @@ impl App {
                 self.selected_ids.retain(|id| {
                     self.bookmarks.iter().any(|bookmark| &bookmark.id == id)
                 });
+                if was_offline {
+                    self.toast_info("Back online");
+                }
+                self.flush_pending_changes();
             }
             Err(err) => {
                 if self.handle_unauthorized(&err) {
                     return;
                 }
-                if append {
+                if err.is_network() {
+                    self.offline = true;
+                    if append {
+                        self.toast_error(
+                            "Offline — could not load more bookmarks.",
+                        );
+                    } else {
+                        self.show_cached_bookmarks(true);
+                    }
+                } else if append {
                     self.toast_error(err.to_string());
                 } else {
                     let message = err.to_string();
@@ -2631,6 +3023,47 @@ impl App {
                     self.toast_error(message);
                 }
             }
+        }
+    }
+
+    fn show_cached_bookmarks(&mut self, notify: bool) {
+        let pending = self.pending_select.take();
+        let Some(cache) = &self.cache else {
+            self.bookmarks.clear();
+            self.total = 0;
+            self.list_state.select(None);
+            self.list_error = Some(if self.offline_mode {
+                "Offline mode — no local cache available.".into()
+            } else {
+                "Offline — no cached bookmarks available.".into()
+            });
+            return;
+        };
+
+        let bookmarks =
+            cache.local_bookmarks(&self.filter, &self.search, self.sort);
+        self.total = bookmarks.len();
+        self.bookmarks = bookmarks;
+        let index = pending
+            .and_then(|id| self.bookmarks.iter().position(|b| b.id == id))
+            .or_else(|| (!self.bookmarks.is_empty()).then_some(0));
+        self.list_state.select(index);
+        self.selected_ids.retain(|id| {
+            self.bookmarks.iter().any(|bookmark| &bookmark.id == id)
+        });
+        self.list_error = Some(if self.bookmarks.is_empty() {
+            if self.offline_mode {
+                "Offline mode — no cached bookmarks for this view.".into()
+            } else {
+                "Offline — no cached bookmarks for this view.".into()
+            }
+        } else if self.offline_mode {
+            "Offline mode — showing cached bookmarks.".into()
+        } else {
+            "Offline — showing cached bookmarks.".into()
+        });
+        if notify {
+            self.toast_info("Offline — using local cache");
         }
     }
 
@@ -2647,12 +3080,15 @@ impl App {
                 }
             }
         }
+        if let Some(cache) = &mut self.cache {
+            cache.apply_patch(id, patch);
+            let _ = cache.save();
+        }
 
         let filter = self.filter.clone();
         let before = self.bookmarks.len();
-        self.bookmarks.retain(|bookmark| {
-            bookmark.id != id || keeps_filter(&filter, bookmark)
-        });
+        self.bookmarks
+            .retain(|bookmark| bookmark.id != id || filter.matches(bookmark));
         if self.bookmarks.len() < before {
             self.total =
                 self.total.saturating_sub(before - self.bookmarks.len());
@@ -2681,12 +3117,17 @@ impl App {
                 }
             }
         }
+        if let Some(cache) = &mut self.cache {
+            for id in ids {
+                cache.apply_patch(id, patch);
+            }
+            let _ = cache.save();
+        }
 
         let filter = self.filter.clone();
         let before = self.bookmarks.len();
         self.bookmarks.retain(|bookmark| {
-            !id_set.contains(bookmark.id.as_str())
-                || keeps_filter(&filter, bookmark)
+            !id_set.contains(bookmark.id.as_str()) || filter.matches(bookmark)
         });
         if self.bookmarks.len() < before {
             self.total =
@@ -2718,6 +3159,12 @@ impl App {
         }
         self.selected_ids
             .retain(|selected| !id_set.contains(selected.as_str()));
+        if let Some(cache) = &mut self.cache {
+            for id in ids {
+                cache.remove_bookmark(id);
+            }
+            let _ = cache.save();
+        }
         if self
             .reader
             .as_ref()
@@ -2745,6 +3192,10 @@ impl App {
         } else {
             false
         }
+    }
+
+    pub fn pending_changes(&self) -> usize {
+        self.cache.as_ref().map(Cache::pending_count).unwrap_or(0)
     }
 
     fn open_theme_picker(&mut self) {
@@ -2782,20 +3233,6 @@ impl App {
             text,
             expires: self.tick.wrapping_add(ttl),
         });
-    }
-}
-
-fn keeps_filter(filter: &Filter, bookmark: &Bookmark) -> bool {
-    match filter {
-        Filter::All => true,
-        Filter::Unread => !bookmark.is_archived,
-        Filter::Reading => {
-            (1..100).contains(&bookmark.read_progress) && !bookmark.is_archived
-        }
-        Filter::Marked => bookmark.is_marked && !bookmark.is_archived,
-        Filter::Archived => bookmark.is_archived,
-        Filter::Label(name) => bookmark.labels.iter().any(|l| l == name),
-        Filter::Collection { .. } => true,
     }
 }
 
@@ -3071,24 +3508,24 @@ mod tests {
             read_progress: 0,
             ..Default::default()
         };
-        assert!(keeps_filter(&Filter::Unread, &bookmark));
-        assert!(!keeps_filter(&Filter::Reading, &bookmark));
+        assert!(Filter::Unread.matches(&bookmark));
+        assert!(!Filter::Reading.matches(&bookmark));
 
         bookmark.read_progress = 50;
-        assert!(keeps_filter(&Filter::Reading, &bookmark));
-        assert!(keeps_filter(&Filter::Unread, &bookmark));
+        assert!(Filter::Reading.matches(&bookmark));
+        assert!(Filter::Unread.matches(&bookmark));
 
         bookmark.read_progress = 100;
-        assert!(keeps_filter(&Filter::Unread, &bookmark));
+        assert!(Filter::Unread.matches(&bookmark));
 
         bookmark.labels = vec!["rust".into()];
-        assert!(keeps_filter(&Filter::Label("rust".into()), &bookmark));
-        assert!(!keeps_filter(&Filter::Label("tui".into()), &bookmark));
+        assert!(Filter::Label("rust".into()).matches(&bookmark));
+        assert!(!Filter::Label("tui".into()).matches(&bookmark));
 
         bookmark.is_archived = true;
-        assert!(keeps_filter(&Filter::Label("rust".into()), &bookmark));
-        assert!(!keeps_filter(&Filter::Unread, &bookmark));
-        assert!(keeps_filter(&Filter::Archived, &bookmark));
+        assert!(Filter::Label("rust".into()).matches(&bookmark));
+        assert!(!Filter::Unread.matches(&bookmark));
+        assert!(Filter::Archived.matches(&bookmark));
     }
 
     #[test]
@@ -3470,6 +3907,43 @@ mod tests {
 
         app.handle_list_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn offline_mode_uses_only_the_cache() {
+        let dir = std::env::temp_dir()
+            .join(format!("eckly-offline-test-{}", std::process::id()));
+        let mut cache = Cache::new(dir);
+        cache.upsert_bookmarks(&[Bookmark {
+            id: "offline1".into(),
+            title: Some("Cached bookmark".into()),
+            has_article: true,
+            ..Default::default()
+        }]);
+        cache
+            .write_article("offline1", "<p>cached body</p>")
+            .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::with_cache(
+            Config::default(),
+            PathBuf::from("/tmp/eckly-test"),
+            tx,
+            Some(cache),
+            true,
+        );
+        app.bootstrap();
+
+        assert_eq!(app.screen, Screen::Main);
+        assert!(app.offline);
+        assert!(app.offline_mode);
+        assert!(app.client.is_none());
+        assert_eq!(app.bookmarks.len(), 1);
+
+        app.open_reader();
+        let reader = app.reader.as_ref().unwrap();
+        assert!(!reader.loading);
+        assert!(reader.article.is_some());
     }
 
     #[test]

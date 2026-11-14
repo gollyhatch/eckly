@@ -1,20 +1,23 @@
 mod api;
 mod app;
 mod article;
+mod cache;
 mod config;
 mod event;
 mod input;
 mod models;
+mod sync;
 mod ui;
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tokio::sync::mpsc;
 
 use crate::app::App;
+use crate::cache::Cache;
 use crate::config::Config;
 
 /// A terminal client for reading and managing Readeck bookmarks.
@@ -26,28 +29,43 @@ use crate::config::Config;
     after_help = "Configuration is read from the config file, then overridden by --server/--token \
                   and the READECK_URL, READECK_TOKEN and READECK_API_TOKEN environment variables.\n\
                   Themes: opaline builtins; use --theme, ECKLY_THEME or --list-themes.\n\
+                  Use `eckly sync --help` to cache articles for offline reading.\n\
+                  Use --offline to browse the local cache without contacting Readeck.\n\
                   Run without credentials to use the interactive setup screen."
 )]
 struct Cli {
     /// Readeck server URL (for example https://readeck.example.com)
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", global = true)]
     server: Option<String>,
 
     /// Readeck API token
-    #[arg(long, value_name = "TOKEN")]
+    #[arg(long, value_name = "TOKEN", global = true)]
     token: Option<String>,
 
     /// Path to the configuration file
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     config: Option<PathBuf>,
 
     /// Color theme (opaline builtin ID or display name)
-    #[arg(long, value_name = "THEME")]
+    #[arg(long, value_name = "THEME", global = true)]
     theme: Option<String>,
+
+    /// Start in offline mode using only the local cache
+    #[arg(long)]
+    offline: bool,
 
     /// List built-in themes and exit
     #[arg(long)]
     list_themes: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Download articles into the local cache for offline reading
+    Sync(sync::SyncArgs),
 }
 
 #[tokio::main]
@@ -84,6 +102,14 @@ async fn main() -> Result<()> {
         config.token = token;
     }
 
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("eckly");
+
+    if let Some(Commands::Sync(args)) = cli.command {
+        return sync::run(&config, &args, cache_dir).await;
+    }
+
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         bail!(
             "eckly must be run in an interactive terminal (try `eckly --help` for options)"
@@ -114,7 +140,15 @@ async fn main() -> Result<()> {
     let (tx, rx) = mpsc::unbounded_channel();
     event::spawn_input_thread(tx.clone());
 
-    let mut app = App::new(config, config_path, tx);
+    let cache = match Cache::load(cache_dir.clone()) {
+        Ok(cache) => Some(cache),
+        Err(err) => {
+            eprintln!("Warning: {err:#}");
+            Some(Cache::new(cache_dir))
+        }
+    };
+
+    let mut app = App::with_cache(config, config_path, tx, cache, cli.offline);
     app.bootstrap();
 
     let mut terminal = ratatui::init();
