@@ -17,7 +17,8 @@ headings, lists, quotes, code blocks and inline images:
 
 - **Browse** the inbox (all non-archived bookmarks, including finished ones),
   reading progress, favorites and archives, or filter by label or collection.
-- **Search** your library with Readeck's full-text search.
+- **Search** your library with Readeck's full-text search, or search within the
+  current article with highlighted matches.
 - **Read** extracted articles in a comfortable, scrollable reader. Plain text is
   reflowed to the terminal width; headings, lists, quotes, code and images are
   rendered inline. Images use truecolor half blocks and are fetched from
@@ -169,7 +170,7 @@ first.
 | `a` | Archive / restore |
 | `t` | Edit labels (comma separated) |
 | `T` | Edit title |
-| `N` | Edit note |
+| `E` | Edit note |
 | `D` | Delete highlighted/selected bookmarks (with confirmation) |
 | `o` | Open the original page in your browser |
 | `/` | Search (empty query clears; `Ctrl+w` deletes the previous word) |
@@ -207,14 +208,17 @@ progress or archive status.
 | `PgUp` / `b` | Page up |
 | `Ctrl+d`, `Ctrl+u` | Half page down / up |
 | `g` / `G` | Top / bottom |
+| `/` | Search the article text |
+| `n` / `N` | Next / previous search match |
 | `m`, `f`, `a` | Toggle read, favorite, archive |
-| `t`, `T`, `N` | Edit labels, title, note |
+| `t`, `T`, `E` | Edit labels, title, note |
 | `D` | Delete the bookmark (with confirmation) |
 | `i` | Enable / disable inline images |
 | `A` | Toggle centered / left-aligned text |
 | `o` | Open in browser |
 | `r` | Retry loading the article |
-| `Esc` / `q` | Back to the list |
+| `Esc` | Clear the article search, then return to the list |
+| `q` | Return to the list |
 
 ### General
 

@@ -23,6 +23,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let reader_progress;
     let reader_meta;
+    let reader_search;
 
     {
         let Some(reader) = app.reader.as_mut() else {
@@ -192,10 +193,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     if let Some(cells) = &line.image {
                         image_line(cells, content_width as usize)
                     } else {
-                        Line::from(Span::styled(
-                            line.text.clone(),
+                        article_line(
+                            &line.text,
                             block_style(line.kind),
-                        ))
+                            reader.search_query.as_deref(),
+                        )
                     }
                 })
                 .collect();
@@ -219,6 +221,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             (reader.scroll + 1).min(reader.lines.len().max(1)),
             reader.lines.len()
         );
+        reader_search = reader.search_query.as_ref().map(|query| {
+            format!(
+                "search “{}” · {} matches ",
+                super::truncate_width(query, 24),
+                reader.search_match_lines().len()
+            )
+        });
     }
 
     let [footer_top, footer_bottom] =
@@ -239,10 +248,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         footer_top,
     );
 
-    let right = format!(
-        "{} ",
-        super::truncate_width(&reader_meta, (area.width as usize / 2).max(10))
-    );
+    let right = reader_search.unwrap_or_else(|| {
+        format!(
+            "{} ",
+            super::truncate_width(
+                &reader_meta,
+                (area.width as usize / 2).max(10)
+            )
+        )
+    });
     let [left_area, right_area] = Layout::horizontal([
         Constraint::Min(18),
         Constraint::Length(area.width / 2),
@@ -294,6 +308,44 @@ fn block_style(kind: Option<BlockKind>) -> Style {
             .fg(theme::faint())
             .add_modifier(Modifier::ITALIC),
     }
+}
+
+fn article_line(text: &str, base: Style, query: Option<&str>) -> Line<'static> {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return Line::from(Span::styled(text.to_string(), base));
+    };
+    let lower = text.to_ascii_lowercase();
+    let needle = query.to_ascii_lowercase();
+    if !lower.contains(&needle) {
+        return Line::from(Span::styled(text.to_string(), base));
+    }
+
+    let highlight = Style::new()
+        .fg(theme::bg_base())
+        .bg(theme::accent_alt())
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    let mut start = 0;
+    while let Some(relative) = lower[start..].find(&needle) {
+        let match_start = start + relative;
+        let match_end = match_start + needle.len();
+        if match_start > start {
+            spans
+                .push(Span::styled(text[start..match_start].to_string(), base));
+        }
+        spans.push(Span::styled(
+            text[match_start..match_end].to_string(),
+            highlight,
+        ));
+        start = match_end;
+        if start >= text.len() {
+            break;
+        }
+    }
+    if start < text.len() {
+        spans.push(Span::styled(text[start..].to_string(), base));
+    }
+    Line::from(spans)
 }
 
 fn image_line(cells: &[ImageCell], width: usize) -> Line<'static> {

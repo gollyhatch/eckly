@@ -131,6 +131,8 @@ pub struct Reader {
     pub max_text_width: usize,
     /// Center the constrained reading column when it is narrower.
     pub center_text: bool,
+    /// Active in-article search query.
+    pub search_query: Option<String>,
 }
 
 impl Reader {
@@ -159,6 +161,7 @@ impl Reader {
             show_images,
             max_text_width,
             center_text,
+            search_query: None,
         }
     }
 
@@ -323,6 +326,63 @@ impl Reader {
         }
         ((self.scroll as f32 / max as f32) * 100.0).round() as u8
     }
+
+    fn line_contains(text: &str, query: &str) -> bool {
+        text.to_ascii_lowercase()
+            .contains(&query.to_ascii_lowercase())
+    }
+
+    pub fn search_match_lines(&self) -> Vec<usize> {
+        let Some(query) = self.search_query.as_deref() else {
+            return Vec::new();
+        };
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| Self::line_contains(&line.text, query))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Search the article and jump to the first match at or below the
+    /// current reading position. Returns the number of matching lines.
+    pub fn search(&mut self, query: &str) -> usize {
+        let query = query.trim();
+        if query.is_empty() {
+            self.search_query = None;
+            return 0;
+        }
+        self.search_query = Some(query.to_string());
+        let matches = self.search_match_lines();
+        let target = matches
+            .iter()
+            .copied()
+            .find(|&index| index >= self.scroll)
+            .or_else(|| matches.first().copied());
+        if let Some(index) = target {
+            self.jump_to(index);
+        }
+        matches.len()
+    }
+
+    pub fn next_search_match(&mut self, forward: bool) {
+        let matches = self.search_match_lines();
+        if matches.is_empty() {
+            return;
+        }
+        let target = if forward {
+            matches.iter().copied().find(|&index| index > self.scroll)
+        } else {
+            matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|&index| index < self.scroll)
+        };
+        if let Some(index) = target {
+            self.jump_to(index);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -398,6 +458,7 @@ pub struct LabelCompletion {
 #[derive(Debug)]
 pub enum InputKind {
     Search,
+    ReaderSearch,
     NewBookmark,
     EditLabels { ids: Vec<String> },
     EditNote { id: String },
@@ -1121,7 +1182,7 @@ impl App {
             KeyCode::Char('D') => self.confirm_delete(),
             KeyCode::Char('t') => self.edit_labels(),
             KeyCode::Char('T') => self.edit_title(),
-            KeyCode::Char('N') => self.edit_note(),
+            KeyCode::Char('E') => self.edit_note(),
             _ => {}
         }
     }
@@ -1148,10 +1209,21 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc
-            | KeyCode::Char('q')
-            | KeyCode::Char('h')
-            | KeyCode::Left => {
+            KeyCode::Esc => {
+                let has_results = self.reader.as_ref().is_some_and(|reader| {
+                    reader.search_query.is_some()
+                        && !reader.search_match_lines().is_empty()
+                });
+                if has_results {
+                    if let Some(reader) = &mut self.reader {
+                        reader.search_query = None;
+                    }
+                    self.toast_info("Article search cleared");
+                } else {
+                    self.close_reader();
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                 self.close_reader();
             }
             KeyCode::Down | KeyCode::Char('j') => self.reader_scroll(1),
@@ -1188,10 +1260,21 @@ impl App {
             KeyCode::Char('o') => self.open_in_browser(),
             KeyCode::Char('t') => self.edit_labels(),
             KeyCode::Char('T') => self.edit_title(),
-            KeyCode::Char('N') => self.edit_note(),
+            KeyCode::Char('E') => self.edit_note(),
             KeyCode::Char('i') => self.toggle_reader_images(),
             KeyCode::Char('A') => self.toggle_reader_alignment(),
             KeyCode::Char('D') => self.confirm_delete(),
+            KeyCode::Char('/') => self.open_reader_search(),
+            KeyCode::Char('n') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.next_search_match(true);
+                }
+            }
+            KeyCode::Char('N') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.next_search_match(false);
+                }
+            }
             KeyCode::Char('r') => self.retry_article(),
             _ => {}
         }
@@ -1813,6 +1896,19 @@ impl App {
         )));
     }
 
+    fn open_reader_search(&mut self) {
+        let Some(reader) = &self.reader else {
+            return;
+        };
+        let prefill = reader.search_query.clone().unwrap_or_default();
+        self.modal = Some(Modal::Input(InputModal::new(
+            "Search article",
+            "Search this article (empty clears)",
+            TextInput::new(prefill),
+            InputKind::ReaderSearch,
+        )));
+    }
+
     fn edit_labels(&mut self) {
         let targets = self.action_targets();
         if targets.is_empty() {
@@ -1959,6 +2055,19 @@ impl App {
                     self.toast_info("Search cleared");
                 } else {
                     self.toast_info(format!("Search: “{}”", self.search));
+                }
+            }
+            InputKind::ReaderSearch => {
+                let Some(reader) = &mut self.reader else {
+                    return;
+                };
+                let count = reader.search(&value);
+                if value.is_empty() {
+                    self.toast_info("Article search cleared");
+                } else if count == 0 {
+                    self.toast_info(format!("No matches for “{value}”"));
+                } else {
+                    self.toast_info(format!("{count} matches for “{value}”"));
                 }
             }
             InputKind::NewBookmark => {
@@ -3029,6 +3138,70 @@ mod tests {
 
         reader.scroll_to(0);
         assert_eq!(reader.progress(), 0);
+    }
+
+    #[test]
+    fn escape_clears_article_search_before_closing_reader() {
+        let mut app = test_app_with_bookmarks(1);
+        app.bookmarks[0].has_article = false;
+        app.open_reader();
+        if let Some(reader) = &mut app.reader {
+            reader.viewport = 1;
+            reader.set_article(Article::from_text_blocks(vec![
+                ("", "alpha first".into()),
+                ("", "alpha second".into()),
+            ]));
+            assert_eq!(reader.search("alpha"), 2);
+        }
+
+        app.handle_reader_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.reader.is_some());
+        assert!(app.reader.as_ref().unwrap().search_query.is_none());
+
+        app.handle_reader_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.reader.is_none());
+
+        app.open_reader();
+        if let Some(reader) = &mut app.reader {
+            assert_eq!(reader.search("no-such-text"), 0);
+        }
+        app.handle_reader_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.reader.is_none());
+    }
+
+    #[test]
+    fn article_search_finds_and_navigates_matches() {
+        let bookmark = Bookmark {
+            has_article: true,
+            ..Default::default()
+        };
+        let mut reader = Reader::new(bookmark, true, 0, true);
+        reader.viewport = 1;
+        reader.set_article(Article::from_text_blocks(vec![
+            ("", "alpha first".into()),
+            ("", "beta".into()),
+            ("", "Alpha second".into()),
+        ]));
+
+        assert_eq!(reader.search("alpha"), 2);
+        assert_eq!(reader.scroll, 0);
+
+        reader.next_search_match(true);
+        assert_eq!(reader.scroll, 4);
+
+        reader.next_search_match(true);
+        assert_eq!(reader.scroll, 4);
+
+        reader.next_search_match(false);
+        assert_eq!(reader.scroll, 0);
+
+        reader.next_search_match(true);
+        assert_eq!(reader.scroll, 4);
+        reader.next_search_match(false);
+        assert_eq!(reader.scroll, 0);
+
+        assert_eq!(reader.search(""), 0);
+        assert!(reader.search_query.is_none());
     }
 
     #[test]
