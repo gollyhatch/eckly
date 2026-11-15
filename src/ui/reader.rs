@@ -9,6 +9,7 @@ use ratatui::widgets::{
 use crate::app::App;
 use crate::article::{BlockKind, ImageCell};
 use crate::models::ReadStatus;
+use crate::speed::SpeedReader;
 
 use super::theme;
 
@@ -24,11 +25,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let reader_progress;
     let reader_meta;
     let reader_search;
+    let speed_reading;
 
     {
         let Some(reader) = app.reader.as_mut() else {
             return;
         };
+        speed_reading = reader.speed.is_some();
 
         let block = Block::bordered()
             .border_style(Style::new().fg(theme::border()))
@@ -183,6 +186,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     Style::new().fg(theme::dim()),
                 ))],
             );
+        } else if let Some(speed) = &reader.speed {
+            draw_speed(frame, inner, speed, content_width as usize);
         } else {
             let visible: Vec<Line> = reader
                 .lines
@@ -216,11 +221,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             }
         }
 
-        reader_progress = format!(
-            "{live_progress}% read · line {} of {}",
-            (reader.scroll + 1).min(reader.lines.len().max(1)),
-            reader.lines.len()
-        );
+        reader_progress = match &reader.speed {
+            Some(speed) => {
+                let state = if speed.playing() {
+                    ""
+                } else if speed.index() + 1 >= speed.total() {
+                    " · finished"
+                } else {
+                    " · paused"
+                };
+                format!(
+                    "word {} of {} · {} wpm{state}",
+                    speed.index() + 1,
+                    speed.total(),
+                    speed.wpm()
+                )
+            }
+            None => format!(
+                "{live_progress}% read · line {} of {}",
+                (reader.scroll + 1).min(reader.lines.len().max(1)),
+                reader.lines.len()
+            ),
+        };
         reader_search = reader.search_query.as_ref().map(|query| {
             format!(
                 "search “{}” · {} matches ",
@@ -234,7 +256,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
             .areas(footer_area);
 
-    let hints = "  j/k scroll · Space paragraph · Ctrl+d/u half · g/G top/bottom · m read · f favorite · a archive · t labels · i images · o browser · Esc back";
+    let hints = if speed_reading {
+        "  Space pause/resume · +/- words per minute · s or Esc back to article"
+    } else {
+        "  j/k scroll · Space paragraph · Ctrl+d/u half · g/G top/bottom · s speed read · m read · f favorite · a archive · t labels · i images · o browser · Esc back"
+    };
     let top = if let Some(toast) = super::toast_line(app) {
         toast
     } else {
@@ -378,6 +404,33 @@ fn image_line(cells: &[ImageCell], width: usize) -> Line<'static> {
         ));
     }
     Line::from(spans)
+}
+
+fn draw_speed(
+    frame: &mut Frame,
+    area: Rect,
+    speed: &SpeedReader,
+    width: usize,
+) {
+    let word = super::truncate_width(speed.current(), width.max(1));
+    let status = if speed.playing() {
+        format!("{} wpm", speed.wpm())
+    } else if speed.index() + 1 >= speed.total() {
+        format!("{} wpm · finished — Space to restart", speed.wpm())
+    } else {
+        format!("{} wpm · paused — Space to resume", speed.wpm())
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            word,
+            Style::new()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(status, Style::new().fg(theme::faint()))),
+    ];
+    centered(frame, area, &lines);
 }
 
 fn centered(frame: &mut Frame, area: Rect, lines: &[Line<'static>]) {

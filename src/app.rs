@@ -19,6 +19,7 @@ use crate::models::{
     Bookmark, BookmarkPatch, BookmarkQuery, Collection, Filter, Label, Profile,
     Sort,
 };
+use crate::speed::{MAX_WPM, MIN_WPM, SpeedReader, WPM_STEP};
 
 const PAGE_SIZE: usize = 50;
 
@@ -134,6 +135,8 @@ pub struct Reader {
     pub center_text: bool,
     /// Active in-article search query.
     pub search_query: Option<String>,
+    /// Active speed reading session.
+    pub speed: Option<SpeedReader>,
 }
 
 impl Reader {
@@ -163,6 +166,7 @@ impl Reader {
             max_text_width,
             center_text,
             search_query: None,
+            speed: None,
         }
     }
 
@@ -170,6 +174,7 @@ impl Reader {
         self.article = Some(article);
         self.loading = false;
         self.error = None;
+        self.speed = None;
         self.images.clear();
         self.image_errors.clear();
         self.requested_images.clear();
@@ -326,6 +331,27 @@ impl Reader {
             return 100;
         }
         ((self.scroll as f32 / max as f32) * 100.0).round() as u8
+    }
+
+    pub fn speed_reading(&self) -> bool {
+        self.speed.is_some()
+    }
+
+    /// Leave speed reading and move the article view to the word being read.
+    pub fn stop_speed_reading(&mut self) {
+        if let Some(speed) = self.speed.take() {
+            let max = self.max_scroll();
+            let position = (speed.ratio() * max as f32).round() as usize;
+            self.jump_to(position);
+        }
+    }
+
+    /// When the next speed reading word is due, if it is playing.
+    pub fn speed_frame_deadline(&self) -> Option<Instant> {
+        self.speed
+            .as_ref()
+            .filter(|speed| speed.playing())
+            .map(SpeedReader::next_due)
     }
 
     fn line_contains(text: &str, query: &str) -> bool {
@@ -1265,6 +1291,10 @@ impl App {
     }
 
     fn handle_reader_key(&mut self, key: KeyEvent) {
+        if self.reader.as_ref().is_some_and(Reader::speed_reading) {
+            self.handle_speed_read_key(key);
+            return;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             let half = self
                 .reader
@@ -1340,6 +1370,7 @@ impl App {
             KeyCode::Char('E') => self.edit_note(),
             KeyCode::Char('i') => self.toggle_reader_images(),
             KeyCode::Char('A') => self.toggle_reader_alignment(),
+            KeyCode::Char('s') => self.toggle_speed_reading(),
             KeyCode::Char('D') => self.confirm_delete(),
             KeyCode::Char('/') => self.open_reader_search(),
             KeyCode::Char('n') => {
@@ -1747,9 +1778,10 @@ impl App {
     }
 
     fn close_reader(&mut self) {
-        let Some(reader) = self.reader.take() else {
+        let Some(mut reader) = self.reader.take() else {
             return;
         };
+        reader.stop_speed_reading();
         let progress = reader.progress();
         if reader.scrolled
             && !reader.manual_read_state
@@ -1769,6 +1801,78 @@ impl App {
         if let Some(reader) = &mut self.reader {
             reader.scroll_by(delta);
         }
+    }
+
+    fn handle_speed_read_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('s') => self.stop_speed_reading(),
+            KeyCode::Char(' ') => self.toggle_speed_play(),
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.adjust_speed_wpm(WPM_STEP)
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                self.adjust_speed_wpm(-WPM_STEP)
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_speed_reading(&mut self) {
+        let wpm = self.config.speed_read_wpm;
+        let Some(reader) = self.reader.as_mut() else {
+            return;
+        };
+        if reader.speed.is_some() {
+            reader.stop_speed_reading();
+        } else if !reader.lines.is_empty() {
+            let speed = SpeedReader::new(&reader.lines, reader.scroll, wpm);
+            reader.speed = speed;
+        }
+    }
+
+    fn stop_speed_reading(&mut self) {
+        if let Some(reader) = self.reader.as_mut() {
+            reader.stop_speed_reading();
+        }
+    }
+
+    fn toggle_speed_play(&mut self) {
+        if let Some(speed) = self.reader.as_mut().and_then(|r| r.speed.as_mut())
+        {
+            speed.toggle_play(Instant::now());
+        }
+    }
+
+    fn adjust_speed_wpm(&mut self, delta: i16) {
+        let wpm = {
+            let Some(speed) =
+                self.reader.as_mut().and_then(|r| r.speed.as_mut())
+            else {
+                return;
+            };
+            let wpm = (i32::from(speed.wpm()) + i32::from(delta))
+                .clamp(i32::from(MIN_WPM), i32::from(MAX_WPM))
+                as u16;
+            speed.set_wpm(wpm, Instant::now());
+            wpm
+        };
+        self.config.speed_read_wpm = wpm;
+    }
+
+    /// Advance the speed reader when its next word is due.
+    pub fn advance_speed_reading(&mut self) {
+        if let Some(speed) = self.reader.as_mut().and_then(|r| r.speed.as_mut())
+        {
+            speed.advance(Instant::now());
+        }
+    }
+
+    /// When the speed reader needs to redraw, if it is playing.
+    pub fn speed_frame_deadline(&self) -> Option<Instant> {
+        self.reader.as_ref().and_then(Reader::speed_frame_deadline)
     }
 
     // ------------------------------------------------------------------

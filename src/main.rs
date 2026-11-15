@@ -6,6 +6,7 @@ mod config;
 mod event;
 mod input;
 mod models;
+mod speed;
 mod sync;
 mod ui;
 
@@ -169,9 +170,23 @@ async fn run(
             break;
         }
 
-        match rx.recv().await {
-            Some(event) => app.handle_event(event),
-            None => break,
+        // While speed reading, wake up exactly when the next word is due
+        // instead of waiting for the coarse input poll tick.
+        if let Some(deadline) = app.speed_frame_deadline() {
+            tokio::select! {
+                event = rx.recv() => match event {
+                    Some(event) => app.handle_event(event),
+                    None => break,
+                },
+                _ = tokio::time::sleep_until(deadline.into()) => {
+                    app.advance_speed_reading();
+                }
+            }
+        } else {
+            match rx.recv().await {
+                Some(event) => app.handle_event(event),
+                None => break,
+            }
         }
     }
     Ok(())

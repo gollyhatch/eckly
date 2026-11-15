@@ -25,10 +25,17 @@ pub struct Config {
     /// Reading column alignment: `center` (default) or `left`.
     #[serde(default = "default_text_align")]
     pub text_align: String,
+    /// Speed reading pace in words per minute.
+    #[serde(default = "default_speed_read_wpm")]
+    pub speed_read_wpm: u16,
 }
 
 fn default_text_align() -> String {
     "center".to_string()
+}
+
+fn default_speed_read_wpm() -> u16 {
+    crate::speed::DEFAULT_WPM
 }
 
 fn default_images() -> bool {
@@ -44,6 +51,7 @@ impl Default for Config {
             images: true,
             text_width: 0,
             text_align: default_text_align(),
+            speed_read_wpm: default_speed_read_wpm(),
         }
     }
 }
@@ -162,6 +170,11 @@ mod tests {
 
         let config: Config = toml::from_str("text_align = \"left\"").unwrap();
         assert_eq!(config.text_align, "left");
+
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.speed_read_wpm, 300);
+        let config: Config = toml::from_str("speed_read_wpm = 450").unwrap();
+        assert_eq!(config.speed_read_wpm, 450);
     }
 
     #[test]

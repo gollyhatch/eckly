@@ -98,6 +98,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         binding("D", "Delete bookmark"),
         binding("i", "Toggle images"),
         binding("A", "Toggle text alignment"),
+        binding("s", "Speed reading (Space, +/- pace)"),
         binding("o", "Open in browser"),
         binding("r", "Retry article"),
         binding("Esc", "Clear search, then back"),

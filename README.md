@@ -78,6 +78,7 @@ theme = "catppuccin-mocha"
 images = true
 text_width = 100
 text_align = "center"
+speed_read_wpm = 300
 ```
 
 `images` controls whether inline article images are rendered; it defaults to
@@ -88,6 +89,11 @@ text_align = "center"
 `text_width`, `text_align = "center"` (the default) centers the column; set
 `text_align = "left"` to align it with the left edge instead. Press `A` in the
 reader to toggle alignment for the current session.
+
+`speed_read_wpm` sets the speed reading pace in words per minute (default
+`300`). Press `s` in the reader to show one word at a time, starting at the
+current position. `Space` pauses or resumes, `+`/`-` change the pace for the
+session, and `Esc` returns to the article at the word you reached.
 
 Credentials can also be supplied per run:
 
@@ -284,10 +290,14 @@ progress or archive status.
 | `D` | Delete the bookmark (with confirmation) |
 | `i` | Enable / disable inline images |
 | `A` | Toggle centered / left-aligned text |
+| `s` | Speed reading (RSVP) |
 | `o` | Open in browser |
 | `r` | Retry loading the article |
 | `Esc` | Clear the article search, then return to the list |
 | `q` | Return to the list |
+
+While speed reading, `Space` pauses or resumes, `+` / `-` change the pace by 25
+words per minute, and `s` or `Esc` returns to the article.
 
 ### General
 
