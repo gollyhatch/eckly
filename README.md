@@ -69,7 +69,8 @@ or OAuth device login (`Ctrl+O`). To use a token, create one in Readeck under
 - `~/.config/eckly/config.toml` when `XDG_CONFIG_HOME` is not set.
 
 The file contains the server URL, token and optional theme, and is written with
-mode `0600` on Unix:
+mode `0600` on Unix. A configuration file that exists but cannot be read or
+parsed aborts startup with an error instead of showing the setup screen.
 
 ```toml
 server = "https://readeck.example.com"

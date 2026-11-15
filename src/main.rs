@@ -83,14 +83,7 @@ async fn main() -> Result<()> {
     }
     let config_path = cli.config.unwrap_or_else(config::default_path);
 
-    let mut config = match Config::load(&config_path) {
-        Ok(Some(config)) => config,
-        Ok(None) => Config::default(),
-        Err(err) => {
-            eprintln!("Warning: {err:#}");
-            Config::default()
-        }
-    };
+    let mut config = Config::load(&config_path)?.unwrap_or_default();
 
     if let Some(server) = cli.server.or_else(|| env_value("READECK_URL")) {
         config.server = server;
