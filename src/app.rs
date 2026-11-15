@@ -2460,30 +2460,6 @@ impl App {
             }
         }
 
-        let labels: Vec<&Label> = self
-            .labels
-            .iter()
-            .filter(|label| {
-                !label.name.trim().is_empty() && matches(&label.name)
-            })
-            .collect();
-        if !labels.is_empty() {
-            items.push(SidebarItem {
-                filter: None,
-                text: "LABELS".into(),
-                count: None,
-                header: true,
-            });
-            for label in labels {
-                items.push(SidebarItem {
-                    filter: Some(Filter::Label(label.name.clone())),
-                    text: format!("# {}", label.name),
-                    count: Some(label.count),
-                    header: false,
-                });
-            }
-        }
-
         let mut collections: Vec<&Collection> = self
             .collections
             .iter()
@@ -2511,6 +2487,30 @@ impl App {
                     }),
                     text: format!("▤  {}", collection.name),
                     count: None,
+                    header: false,
+                });
+            }
+        }
+
+        let labels: Vec<&Label> = self
+            .labels
+            .iter()
+            .filter(|label| {
+                !label.name.trim().is_empty() && matches(&label.name)
+            })
+            .collect();
+        if !labels.is_empty() {
+            items.push(SidebarItem {
+                filter: None,
+                text: "LABELS".into(),
+                count: None,
+                header: true,
+            });
+            for label in labels {
+                items.push(SidebarItem {
+                    filter: Some(Filter::Label(label.name.clone())),
+                    text: format!("# {}", label.name),
+                    count: Some(label.count),
                     header: false,
                 });
             }
@@ -3806,6 +3806,36 @@ mod tests {
 
         assert!(app.reader.is_some());
         assert_eq!(app.selected_ids.len(), 2);
+    }
+
+    #[test]
+    fn collections_are_listed_before_labels() {
+        let mut app = test_app_with_bookmarks(1);
+        app.labels = vec![Label {
+            name: "rust".into(),
+            count: 1,
+        }];
+        app.collections = vec![Collection {
+            id: "c1".into(),
+            name: "Read later".into(),
+            ..Default::default()
+        }];
+        app.rebuild_sidebar();
+
+        let texts: Vec<&str> = app
+            .sidebar_items
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect();
+        let collections = texts
+            .iter()
+            .position(|text| *text == "COLLECTIONS")
+            .unwrap();
+        let labels = texts.iter().position(|text| *text == "LABELS").unwrap();
+        assert_eq!(
+            &texts[collections..=labels],
+            &["COLLECTIONS", "▤  Read later", "LABELS"]
+        );
     }
 
     #[test]
