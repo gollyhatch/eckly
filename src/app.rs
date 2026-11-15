@@ -3922,6 +3922,27 @@ mod tests {
     }
 
     #[test]
+    fn library_search_cursor_follows_typed_text() {
+        use ratatui::Terminal;
+        use ratatui::backend::{Backend, TestBackend};
+
+        let mut app = test_app_with_bookmarks(1);
+        app.focus = Focus::Sidebar;
+        app.sidebar_search = TextInput::new("read");
+        app.sidebar_search_active = true;
+        app.rebuild_sidebar();
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+
+        // Left border, the " / " prompt, then the four typed characters.
+        let position = terminal.backend_mut().get_cursor_position().unwrap();
+        assert_eq!((position.x, position.y), (8, 2));
+    }
+
+    #[test]
     fn collections_are_listed_before_labels() {
         let mut app = test_app_with_bookmarks(1);
         app.labels = vec![Label {

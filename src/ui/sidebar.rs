@@ -10,6 +10,10 @@ use crate::models::Filter;
 
 use super::theme;
 
+/// Prompt shown before the library filter text.
+const SEARCH_PREFIX: &str = " / ";
+const SEARCH_PREFIX_WIDTH: u16 = SEARCH_PREFIX.len() as u16;
+
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
     let border = if focused {
@@ -34,18 +38,19 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar_viewport = list_area.height.max(1) as usize;
 
     let search_active = app.sidebar_search_active;
-    let search_width = search_area.width.saturating_sub(2) as usize;
+    let search_width =
+        search_area.width.saturating_sub(SEARCH_PREFIX_WIDTH) as usize;
     let visible = app.sidebar_search.visible(search_width);
     let search_spans = if !search_active && app.sidebar_search.value.is_empty()
     {
         vec![
-            Span::styled(" / ", Style::new().fg(theme::faint())),
+            Span::styled(SEARCH_PREFIX, Style::new().fg(theme::faint())),
             Span::styled("filter library", Style::new().fg(theme::faint())),
         ]
     } else {
         vec![
             Span::styled(
-                " / ",
+                SEARCH_PREFIX,
                 Style::new().fg(if search_active {
                     theme::accent()
                 } else {
@@ -72,7 +77,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     if search_active {
         frame.set_cursor_position((
-            search_area.x + 2 + visible.cursor_column,
+            search_area.x + SEARCH_PREFIX_WIDTH + visible.cursor_column,
             search_area.y,
         ));
     }
