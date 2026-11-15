@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::article::WrappedLine;
+use crate::article::{BlockKind, WrappedLine};
 
 pub const DEFAULT_WPM: u16 = 300;
 pub const MIN_WPM: u16 = 100;
@@ -39,6 +39,10 @@ impl SpeedReader {
         let mut words = Vec::new();
         let mut start = None;
         for (line_index, line) in lines.iter().enumerate() {
+            // Rendered images and their placeholders are not words.
+            if line.kind == Some(BlockKind::Image) {
+                continue;
+            }
             let mut line_words = line.text.split_whitespace();
             if start.is_none() && line_index >= from_line {
                 if let Some(first) = line_words.next() {
@@ -235,6 +239,22 @@ mod tests {
         speed.advance(start + Duration::from_millis(99));
         assert_eq!(speed.current(), "one");
         speed.advance(start + Duration::from_millis(101));
+        assert_eq!(speed.current(), "two");
+    }
+
+    #[test]
+    fn skips_image_placeholders_and_rows() {
+        let mut placeholders = lines(&["one", "[image: alt]", "two"]);
+        placeholders[1].kind = Some(BlockKind::Image);
+        let speed = SpeedReader::new(&placeholders, 0, 300).unwrap();
+        assert_eq!(speed.total(), 2);
+        assert_eq!(speed.current(), "one");
+
+        let mut rendered = lines(&["one", "    ", "two"]);
+        rendered[1].kind = Some(BlockKind::Image);
+        rendered[1].image = Some(Vec::new());
+        let speed = SpeedReader::new(&rendered, 1, 300).unwrap();
+        assert_eq!(speed.total(), 2);
         assert_eq!(speed.current(), "two");
     }
 
