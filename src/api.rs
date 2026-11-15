@@ -476,25 +476,19 @@ impl ReadeckClient {
     }
 
     /// Rename a label on every bookmark that carries it.
+    ///
+    /// Readeck takes the current label as the `name` query parameter and the
+    /// new name in the body.
     pub async fn rename_label(
         &self,
         name: &str,
         new_name: &str,
     ) -> Result<(), ApiError> {
-        let mut url = url::Url::parse(&self.endpoint("/bookmarks/labels/"))
-            .map_err(|err| ApiError::InvalidUrl(err.to_string()))?;
-        {
-            let mut segments = url.path_segments_mut().map_err(|_| {
-                ApiError::InvalidUrl(
-                    "server URL cannot hold path segments".into(),
-                )
-            })?;
-            segments.pop_if_empty().push(name);
-        }
         self.send_ok(
             self.http
-                .patch(url)
+                .patch(self.endpoint("/bookmarks/labels"))
                 .bearer_auth(self.token.as_ref())
+                .query(&[("name", name)])
                 .json(&serde_json::json!({ "name": new_name })),
         )
         .await?;
@@ -884,9 +878,8 @@ mod tests {
         client.rename_label("read later", "reading").await.unwrap();
 
         let request = server.await.unwrap();
-        assert!(
-            request.starts_with("PATCH /api/bookmarks/labels/read%20later ")
-        );
+        assert!(request.starts_with("PATCH /api/bookmarks/labels?name=read"));
+        assert!(request.contains("later "));
         assert!(request.contains("\"name\":\"reading\""));
     }
 
