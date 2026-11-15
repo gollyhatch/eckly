@@ -831,7 +831,29 @@ impl App {
                 _ => {
                     let label_input =
                         matches!(input.kind, InputKind::EditLabels { .. });
-                    input.input.handle_edit_key(&key);
+                    let jump = if label_input
+                        && key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        match key.code {
+                            KeyCode::Left => Some(false),
+                            KeyCode::Right => Some(true),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    match jump {
+                        Some(forward) => {
+                            input.input.cursor = label_jump(
+                                &input.input.value,
+                                input.input.cursor,
+                                forward,
+                            );
+                        }
+                        None => {
+                            input.input.handle_edit_key(&key);
+                        }
+                    }
                     if label_input {
                         self.refresh_label_suggestions(&mut input);
                     }
@@ -3349,6 +3371,40 @@ impl App {
     }
 }
 
+/// Cursor position of the previous or next comma-separated label.
+///
+/// Forward moves to the start of the next label, or to the end of the line
+/// when there is none. Backward moves to the start of the current label, or
+/// to the previous one when the cursor is already there.
+fn label_jump(value: &str, cursor: usize, forward: bool) -> usize {
+    let chars: Vec<char> = value.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let mut starts = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == ',' || chars[index].is_whitespace() {
+            index += 1;
+            continue;
+        }
+        starts.push(index);
+        while index < chars.len() && chars[index] != ',' {
+            index += 1;
+        }
+    }
+
+    if forward {
+        starts
+            .into_iter()
+            .find(|start| *start > cursor)
+            .unwrap_or(chars.len())
+    } else {
+        starts
+            .into_iter()
+            .rfind(|start| *start < cursor)
+            .unwrap_or(0)
+    }
+}
+
 /// Locate the comma-separated label token around the cursor.
 ///
 /// Returns character indices for the trimmed token and the text before the
@@ -4318,6 +4374,56 @@ mod tests {
             label_suggestions(&app.labels, "tui, re", 8),
             vec!["read-later"]
         );
+    }
+
+    #[test]
+    fn label_jump_finds_label_boundaries() {
+        let value = "rust, tui ,cli";
+        // Label starts are at 0, 6 and 11.
+        assert_eq!(label_jump(value, 14, false), 11);
+        assert_eq!(label_jump(value, 11, false), 6);
+        assert_eq!(label_jump(value, 6, false), 0);
+        assert_eq!(label_jump(value, 0, false), 0);
+        assert_eq!(label_jump(value, 0, true), 6);
+        assert_eq!(label_jump(value, 6, true), 11);
+        assert_eq!(label_jump(value, 11, true), 14);
+        assert_eq!(label_jump(value, 14, true), 14);
+
+        assert_eq!(label_jump("  ,  ", 3, false), 0);
+        assert_eq!(label_jump("  ,  ", 3, true), 5);
+    }
+
+    #[test]
+    fn alt_arrows_jump_between_labels_in_the_editor() {
+        let mut app = test_app_with_bookmarks(1);
+        app.modal = Some(Modal::Input(InputModal::new(
+            "Edit labels",
+            "",
+            TextInput::new("rust, tui, cli"),
+            InputKind::EditLabels {
+                ids: vec!["bookmark-0".into()],
+            },
+        )));
+
+        let alt_left = KeyEvent::new(KeyCode::Left, KeyModifiers::ALT);
+        let alt_right = KeyEvent::new(KeyCode::Right, KeyModifiers::ALT);
+
+        app.handle_modal_key(alt_left);
+        assert_eq!(label_modal_cursor(&app), 11);
+        app.handle_modal_key(alt_left);
+        assert_eq!(label_modal_cursor(&app), 6);
+        app.handle_modal_key(alt_right);
+        assert_eq!(label_modal_cursor(&app), 11);
+        app.handle_modal_key(alt_right);
+        assert_eq!(label_modal_cursor(&app), 14);
+        assert_eq!(label_modal_value(&app), "rust, tui, cli");
+    }
+
+    fn label_modal_cursor(app: &App) -> usize {
+        match app.modal.as_ref().unwrap() {
+            Modal::Input(input) => input.input.cursor,
+            _ => panic!("expected an input modal"),
+        }
     }
 
     fn label_modal_value(app: &App) -> String {

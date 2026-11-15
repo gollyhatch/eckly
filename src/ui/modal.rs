@@ -117,7 +117,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             Style::new().fg(theme::dim()),
         )),
         Line::from(Span::styled(
-            "Text fields: Ctrl+a/e start/end, Ctrl+w delete word.",
+            "Text fields: Ctrl+a/e, Ctrl+w; Alt+←/→ labels.",
             Style::new().fg(theme::dim()),
         )),
         Line::from(Span::styled(

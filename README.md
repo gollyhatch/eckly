@@ -319,6 +319,7 @@ Text entry fields (search, labels, title, note, new bookmark and setup) support:
 | `Ctrl+a` | Move cursor to the beginning |
 | `Ctrl+e` | Move cursor to the end |
 | `Ctrl+w` | Delete the previous word |
+| `Alt+←` / `Alt+→` | Jump to the previous / next label in the label editor |
 | `Tab` | Complete / cycle labels in the label editor |
 
 ## Notes and limitations
