@@ -640,7 +640,7 @@ fn truncate(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Filter, Sort, SyncChangeKind};
+    use crate::models::{Filter, SearchQuery, Sort, SyncChangeKind};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -694,8 +694,13 @@ mod tests {
         .await;
 
         let client = ReadeckClient::new(&base, "secret-token").unwrap();
-        let query =
-            BookmarkQuery::new(&Filter::Unread, "rust", Sort::Newest, 50, 0);
+        let query = BookmarkQuery::new(
+            &Filter::Unread,
+            &SearchQuery::parse("rust"),
+            Sort::Newest,
+            50,
+            0,
+        );
         let page = client.list_bookmarks(&query).await.unwrap();
         assert_eq!(page.total, 42);
         assert_eq!(page.items.len(), 1);

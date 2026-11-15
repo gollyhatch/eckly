@@ -17,7 +17,7 @@ use crate::event::{ApiEvent, Event, PendingSyncResult};
 use crate::input::TextInput;
 use crate::models::{
     Bookmark, BookmarkPatch, BookmarkQuery, Collection, Filter, Label, Profile,
-    Sort,
+    SearchQuery, Sort,
 };
 use crate::speed::{MAX_WPM, MIN_WPM, SpeedReader, WPM_STEP};
 
@@ -613,8 +613,8 @@ impl App {
         let labels = cache.labels();
         let collections = cache.collections();
         let profile = cache.profile();
-        let bookmarks =
-            cache.local_bookmarks(&self.filter, &self.search, self.sort);
+        let search = SearchQuery::parse(&self.search);
+        let bookmarks = cache.local_bookmarks(&self.filter, &search, self.sort);
 
         self.labels = labels;
         self.collections = collections;
@@ -1552,9 +1552,10 @@ impl App {
 
         let offset = if append { self.bookmarks.len() } else { 0 };
         let seq = self.list_seq;
+        let search = SearchQuery::parse(&self.search);
         let query = BookmarkQuery::new(
             &self.filter,
-            &self.search,
+            &search,
             self.sort,
             PAGE_SIZE,
             offset,
@@ -2461,6 +2462,11 @@ impl App {
         let value = modal.input.value.trim().to_string();
         match modal.kind {
             InputKind::Search => {
+                let search = SearchQuery::parse(&value);
+                if let Some(error) = &search.error {
+                    self.toast_error(error.clone());
+                    return;
+                }
                 self.search = value.clone();
                 self.request_bookmarks(false, false);
                 if self.search.is_empty() {
@@ -3295,8 +3301,8 @@ impl App {
             return;
         };
 
-        let bookmarks =
-            cache.local_bookmarks(&self.filter, &self.search, self.sort);
+        let search = SearchQuery::parse(&self.search);
+        let bookmarks = cache.local_bookmarks(&self.filter, &search, self.sort);
         self.total = bookmarks.len();
         self.bookmarks = bookmarks;
         let index = pending

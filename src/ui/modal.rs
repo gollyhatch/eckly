@@ -284,6 +284,18 @@ fn draw_input(frame: &mut Frame, area: Rect, input: &InputModal) {
             );
         }
     }
+    if matches!(input.kind, InputKind::Search) {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                super::truncate_width(
+                    "Filters: type: lang: status: is: has: after: before:",
+                    suggestion_area.width as usize,
+                ),
+                Style::new().fg(theme::faint()),
+            ))),
+            suggestion_area,
+        );
+    }
 
     let mut hints = vec![
         Span::styled(

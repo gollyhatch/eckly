@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::models::{Bookmark, Collection, Filter, Label, Profile, Sort};
+use crate::models::{
+    Bookmark, Collection, Filter, Label, Profile, SearchQuery, Sort,
+};
 
 const VERSION: u32 = 1;
 
@@ -373,22 +375,19 @@ impl Cache {
     pub fn local_bookmarks(
         &self,
         filter: &Filter,
-        search: &str,
+        search: &SearchQuery,
         sort: Sort,
     ) -> Vec<Bookmark> {
         if matches!(filter, Filter::Collection { .. }) {
             return Vec::new();
         }
 
-        let query = search.trim().to_ascii_lowercase();
         let mut bookmarks: Vec<Bookmark> = self
             .state
             .bookmarks
             .values()
             .filter(|bookmark| !bookmark.is_deleted && filter.matches(bookmark))
-            .filter(|bookmark| {
-                query.is_empty() || local_search_matches(bookmark, &query)
-            })
+            .filter(|bookmark| search.matches(bookmark))
             .cloned()
             .collect();
 
@@ -408,31 +407,6 @@ impl Cache {
         });
         bookmarks
     }
-}
-
-fn local_search_matches(bookmark: &Bookmark, query: &str) -> bool {
-    let mut fields = Vec::new();
-    if let Some(title) = &bookmark.title {
-        fields.push(title.as_str());
-    }
-    if let Some(description) = &bookmark.description {
-        fields.push(description.as_str());
-    }
-    if let Some(note) = &bookmark.note {
-        fields.push(note.as_str());
-    }
-    if let Some(site_name) = &bookmark.site_name {
-        fields.push(site_name.as_str());
-    }
-    if let Some(site) = &bookmark.site {
-        fields.push(site.as_str());
-    }
-    fields.push(bookmark.url.as_str());
-    fields.extend(bookmark.authors.iter().map(String::as_str));
-    fields.extend(bookmark.labels.iter().map(String::as_str));
-    fields
-        .iter()
-        .any(|field| field.to_ascii_lowercase().contains(query))
 }
 
 #[cfg(test)]
@@ -499,13 +473,21 @@ mod tests {
         );
         assert_eq!(
             reloaded
-                .local_bookmarks(&Filter::All, "rust", Sort::Newest)
+                .local_bookmarks(
+                    &Filter::All,
+                    &SearchQuery::parse("rust"),
+                    Sort::Newest
+                )
                 .len(),
             1
         );
         assert_eq!(
             reloaded
-                .local_bookmarks(&Filter::Label("rust".into()), "", Sort::Title)
+                .local_bookmarks(
+                    &Filter::Label("rust".into()),
+                    &SearchQuery::default(),
+                    Sort::Title,
+                )
                 .len(),
             1
         );
@@ -537,7 +519,11 @@ mod tests {
         assert_eq!(labels[0].name, "keep");
         assert_eq!(labels[0].count, 5);
 
-        let bookmarks = cache.local_bookmarks(&Filter::All, "", Sort::Newest);
+        let bookmarks = cache.local_bookmarks(
+            &Filter::All,
+            &SearchQuery::default(),
+            Sort::Newest,
+        );
         assert_eq!(bookmarks.len(), 1);
         assert_eq!(bookmarks[0].labels, vec!["keep".to_string()]);
     }
@@ -559,7 +545,13 @@ mod tests {
         cache.retain_bookmarks(|id| id == "one");
 
         assert_eq!(
-            cache.local_bookmarks(&Filter::All, "", Sort::Newest).len(),
+            cache
+                .local_bookmarks(
+                    &Filter::All,
+                    &SearchQuery::default(),
+                    Sort::Newest,
+                )
+                .len(),
             1
         );
         assert!(cache.has_article("one"));

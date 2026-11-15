@@ -11,7 +11,8 @@ use crate::api::ReadeckClient;
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::models::{
-    Bookmark, BookmarkQuery, Filter, Sort, SyncChange, SyncChangeKind,
+    Bookmark, BookmarkQuery, Filter, SearchQuery, Sort, SyncChange,
+    SyncChangeKind,
 };
 
 const PAGE_SIZE: usize = 100;
@@ -463,8 +464,13 @@ async fn download_bookmark_lists(
     for filter in filters {
         let mut offset = 0;
         loop {
-            let query =
-                BookmarkQuery::new(filter, "", Sort::Newest, PAGE_SIZE, offset);
+            let query = BookmarkQuery::new(
+                filter,
+                &SearchQuery::default(),
+                Sort::Newest,
+                PAGE_SIZE,
+                offset,
+            );
             let page =
                 client.list_bookmarks(&query).await.with_context(|| {
                     format!("could not list bookmarks for {}", filter.title())

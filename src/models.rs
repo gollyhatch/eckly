@@ -57,6 +57,10 @@ pub struct Bookmark {
     pub state: u8,
     #[serde(default)]
     pub loaded: bool,
+    #[serde(default)]
+    pub lang: String,
+    #[serde(default)]
+    pub document_type: String,
 }
 
 impl Bookmark {
@@ -390,6 +394,314 @@ impl Sort {
     }
 }
 
+/// Filters parsed from the search box.
+///
+/// Free text and unrecognized `field:value` terms stay in [`Self::text`] and
+/// are sent as the API `search` parameter, so Readeck's own query syntax
+/// (`title:`, `author:`, `site:`, `label:`, `note:`, quotes, wildcards and
+/// negation) keeps working.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub text: String,
+    pub types: Vec<String>,
+    pub lang: Option<String>,
+    pub read_status: Vec<String>,
+    pub is_marked: Option<bool>,
+    pub is_archived: Option<bool>,
+    pub is_loaded: Option<bool>,
+    pub has_errors: Option<bool>,
+    pub has_labels: Option<bool>,
+    pub has_notes: Option<bool>,
+    pub range_start: Option<String>,
+    pub range_end: Option<String>,
+    pub ids: Vec<String>,
+    /// Set when a filter value is not supported.
+    pub error: Option<String>,
+}
+
+impl SearchQuery {
+    pub fn parse(input: &str) -> Self {
+        let mut query = Self::default();
+        let mut text = Vec::new();
+        for token in input.split_whitespace() {
+            let Some((key, value)) = token.split_once(':') else {
+                text.push(token.to_string());
+                continue;
+            };
+            let key = key.to_ascii_lowercase();
+            let value = unquote_value(value);
+            if value.is_empty() {
+                text.push(token.to_string());
+                continue;
+            }
+            let lower = value.to_ascii_lowercase();
+            match key.as_str() {
+                "type" => match lower.as_str() {
+                    "article" => query.push_type("article"),
+                    "photo" | "picture" => query.push_type("photo"),
+                    "video" => query.push_type("video"),
+                    _ => query.fail("type", &lower, "article, photo or video"),
+                },
+                "lang" => query.lang = Some(value.to_string()),
+                "status" => match lower.as_str() {
+                    "unread" => query.push_status("unread"),
+                    "reading" => query.push_status("reading"),
+                    "read" => query.push_status("read"),
+                    _ => {
+                        query.fail("status", &lower, "unread, reading or read")
+                    }
+                },
+                "is" => match lower.as_str() {
+                    "favorite" | "marked" => query.is_marked = Some(true),
+                    "archived" => query.is_archived = Some(true),
+                    "loaded" => query.is_loaded = Some(true),
+                    _ => {
+                        query.fail("is", &lower, "favorite, archived or loaded")
+                    }
+                },
+                "has" => match lower.as_str() {
+                    "labels" => query.has_labels = Some(true),
+                    "notes" => query.has_notes = Some(true),
+                    "errors" => query.has_errors = Some(true),
+                    _ => query.fail("has", &lower, "labels, notes or errors"),
+                },
+                "after" => query.range_start = Some(value.to_string()),
+                "before" => query.range_end = Some(value.to_string()),
+                "id" => {
+                    if !query.ids.iter().any(|id| id == value) {
+                        query.ids.push(value.to_string());
+                    }
+                }
+                // Field terms and unknown prefixes remain full-text terms.
+                _ => text.push(token.to_string()),
+            }
+            if query.error.is_some() {
+                return query;
+            }
+        }
+        query.text = text.join(" ");
+        query
+    }
+
+    fn push_type(&mut self, kind: &str) {
+        if !self.types.iter().any(|existing| existing == kind) {
+            self.types.push(kind.to_string());
+        }
+    }
+
+    fn push_status(&mut self, status: &str) {
+        if !self.read_status.iter().any(|existing| existing == status) {
+            self.read_status.push(status.to_string());
+        }
+    }
+
+    fn fail(&mut self, key: &str, value: &str, choices: &str) {
+        if self.error.is_none() {
+            self.error =
+                Some(format!("Invalid {key}: “{value}” (use {choices})"));
+        }
+    }
+
+    /// Local membership test for the cached list.
+    pub fn matches(&self, bookmark: &Bookmark) -> bool {
+        if !self.text.is_empty() && !local_text_matches(bookmark, &self.text) {
+            return false;
+        }
+        if !self.types.is_empty()
+            && !self
+                .types
+                .iter()
+                .any(|kind| kind.eq_ignore_ascii_case(&bookmark.document_type))
+        {
+            return false;
+        }
+        if let Some(lang) = &self.lang {
+            if !wildcard_eq(lang, &bookmark.lang) {
+                return false;
+            }
+        }
+        if !self.read_status.is_empty() {
+            let status = match bookmark.status() {
+                ReadStatus::Unread => "unread",
+                ReadStatus::Reading => "reading",
+                ReadStatus::Read => "read",
+            };
+            if !self.read_status.iter().any(|value| value == status) {
+                return false;
+            }
+        }
+        if self.is_marked == Some(true) && !bookmark.is_marked {
+            return false;
+        }
+        if self.is_archived == Some(true) && !bookmark.is_archived {
+            return false;
+        }
+        if self.is_loaded == Some(true) && !bookmark.loaded {
+            return false;
+        }
+        if self.has_errors == Some(true) && !bookmark.has_error() {
+            return false;
+        }
+        if self.has_labels == Some(true) && bookmark.labels.is_empty() {
+            return false;
+        }
+        if self.has_notes == Some(true)
+            && bookmark
+                .note
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            return false;
+        }
+        if !self.ids.is_empty() && !self.ids.iter().any(|id| id == &bookmark.id)
+        {
+            return false;
+        }
+        if let Some(start) = self.range_start.as_deref().and_then(parse_time) {
+            if bookmark.created.is_none_or(|created| created < start) {
+                return false;
+            }
+        }
+        if let Some(end) = self.range_end.as_deref().and_then(parse_time) {
+            if bookmark.created.is_none_or(|created| created > end) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn unquote_value(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(value)
+}
+
+/// Match a value against a pattern where `*` matches anything.
+fn wildcard_eq(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let value = value.to_ascii_lowercase();
+    if !pattern.contains('*') {
+        return value == pattern;
+    }
+    let mut remainder = value.as_str();
+    let mut first = true;
+    for part in pattern.split('*') {
+        if part.is_empty() {
+            first = false;
+            continue;
+        }
+        if first {
+            let Some(rest) = remainder.strip_prefix(part) else {
+                return false;
+            };
+            remainder = rest;
+        } else {
+            let Some(index) = remainder.find(part) else {
+                return false;
+            };
+            remainder = &remainder[index + part.len()..];
+        }
+        first = false;
+    }
+    if pattern.ends_with('*') {
+        true
+    } else {
+        remainder.is_empty()
+    }
+}
+
+/// Parse a Readeck time token for local date filtering.
+///
+/// Supports `now`, `±<n><d|w|m|y>`, RFC 3339 and `YYYY-MM-DD`.
+fn parse_time(value: &str) -> Option<DateTime<Utc>> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "now" {
+        return Some(Utc::now());
+    }
+    let (sign, rest) = if let Some(rest) = value.strip_prefix('-') {
+        (-1i64, rest)
+    } else if let Some(rest) = value.strip_prefix('+') {
+        (1i64, rest)
+    } else {
+        (1i64, value.as_str())
+    };
+    let mut chars = rest.chars();
+    if let Some(unit) = chars.next_back() {
+        if let Ok(count) = chars.as_str().parse::<i64>() {
+            let count = count * sign;
+            let now = Utc::now();
+            match unit {
+                'd' => return Some(now + chrono::Duration::days(count)),
+                'w' => return Some(now + chrono::Duration::weeks(count)),
+                'm' => {
+                    return if count >= 0 {
+                        now.checked_add_months(chrono::Months::new(
+                            count as u32,
+                        ))
+                    } else {
+                        now.checked_sub_months(chrono::Months::new(
+                            (-count) as u32,
+                        ))
+                    };
+                }
+                'y' => {
+                    let months = count.unsigned_abs() as u32 * 12;
+                    return if count >= 0 {
+                        now.checked_add_months(chrono::Months::new(months))
+                    } else {
+                        now.checked_sub_months(chrono::Months::new(months))
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+    DateTime::parse_from_rfc3339(&value)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+        .or_else(|| {
+            chrono::NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|date| date.and_utc())
+        })
+}
+
+fn local_text_matches(bookmark: &Bookmark, query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    let mut fields = Vec::new();
+    if let Some(title) = &bookmark.title {
+        fields.push(title.as_str());
+    }
+    if let Some(description) = &bookmark.description {
+        fields.push(description.as_str());
+    }
+    if let Some(note) = &bookmark.note {
+        fields.push(note.as_str());
+    }
+    if let Some(site_name) = &bookmark.site_name {
+        fields.push(site_name.as_str());
+    }
+    if let Some(site) = &bookmark.site {
+        fields.push(site.as_str());
+    }
+    fields.push(bookmark.url.as_str());
+    fields.extend(bookmark.authors.iter().map(String::as_str));
+    fields.extend(bookmark.labels.iter().map(String::as_str));
+    fields
+        .iter()
+        .any(|field| field.to_ascii_lowercase().contains(&query))
+}
+
 /// Query parameters for the bookmark list endpoint.
 #[derive(Debug, Clone)]
 pub struct BookmarkQuery {
@@ -402,12 +714,21 @@ pub struct BookmarkQuery {
     pub is_marked: Option<bool>,
     pub is_archived: Option<bool>,
     pub collection: Option<String>,
+    pub types: Vec<String>,
+    pub lang: Option<String>,
+    pub is_loaded: Option<bool>,
+    pub has_errors: Option<bool>,
+    pub has_labels: Option<bool>,
+    pub has_notes: Option<bool>,
+    pub range_start: Option<String>,
+    pub range_end: Option<String>,
+    pub ids: Vec<String>,
 }
 
 impl BookmarkQuery {
     pub fn new(
         filter: &Filter,
-        search: &str,
+        search: &SearchQuery,
         sort: Sort,
         limit: usize,
         offset: usize,
@@ -422,6 +743,15 @@ impl BookmarkQuery {
             is_marked: None,
             is_archived: None,
             collection: None,
+            types: Vec::new(),
+            lang: None,
+            is_loaded: None,
+            has_errors: None,
+            has_labels: None,
+            has_notes: None,
+            range_start: None,
+            range_end: None,
+            ids: Vec::new(),
         };
 
         match filter {
@@ -450,9 +780,46 @@ impl BookmarkQuery {
             }
         }
 
-        let search = search.trim();
-        if !search.is_empty() {
-            query.search = Some(search.to_string());
+        let search = search.clone();
+        if !search.text.is_empty() {
+            query.search = Some(search.text);
+        }
+        // Search filters override the view they are combined with.
+        if !search.types.is_empty() {
+            query.types = search.types;
+        }
+        if search.lang.is_some() {
+            query.lang = search.lang;
+        }
+        if !search.read_status.is_empty() {
+            query.read_status = search.read_status;
+        }
+        if let Some(value) = search.is_marked {
+            query.is_marked = Some(value);
+        }
+        if let Some(value) = search.is_archived {
+            query.is_archived = Some(value);
+        }
+        if let Some(value) = search.is_loaded {
+            query.is_loaded = Some(value);
+        }
+        if let Some(value) = search.has_errors {
+            query.has_errors = Some(value);
+        }
+        if let Some(value) = search.has_labels {
+            query.has_labels = Some(value);
+        }
+        if let Some(value) = search.has_notes {
+            query.has_notes = Some(value);
+        }
+        if search.range_start.is_some() {
+            query.range_start = search.range_start;
+        }
+        if search.range_end.is_some() {
+            query.range_end = search.range_end;
+        }
+        if !search.ids.is_empty() {
+            query.ids = search.ids;
         }
         query
     }
@@ -480,6 +847,31 @@ impl BookmarkQuery {
         }
         for status in &self.read_status {
             params.push(("read_status".into(), status.clone()));
+        }
+        for kind in &self.types {
+            params.push(("type".into(), kind.clone()));
+        }
+        if let Some(v) = &self.lang {
+            params.push(("lang".into(), v.clone()));
+        }
+        for (name, value) in [
+            ("is_loaded", self.is_loaded),
+            ("has_errors", self.has_errors),
+            ("has_labels", self.has_labels),
+            ("has_notes", self.has_notes),
+        ] {
+            if let Some(value) = value {
+                params.push((name.into(), value.to_string()));
+            }
+        }
+        if let Some(v) = &self.range_start {
+            params.push(("range_start".into(), v.clone()));
+        }
+        if let Some(v) = &self.range_end {
+            params.push(("range_end".into(), v.clone()));
+        }
+        for id in &self.ids {
+            params.push(("id".into(), id.clone()));
         }
         params
     }
@@ -546,7 +938,7 @@ mod tests {
     fn builds_queries() {
         let q = BookmarkQuery::new(
             &Filter::Unread,
-            "rust tui",
+            &SearchQuery::parse("rust tui"),
             Sort::Newest,
             50,
             100,
@@ -564,7 +956,7 @@ mod tests {
                 id: "c1".into(),
                 name: "Later".into(),
             },
-            "",
+            &SearchQuery::default(),
             Sort::Title,
             25,
             0,
@@ -574,7 +966,7 @@ mod tests {
 
         let q = BookmarkQuery::new(
             &Filter::Label("read later".into()),
-            "",
+            &SearchQuery::default(),
             Sort::Newest,
             50,
             0,
@@ -583,6 +975,113 @@ mod tests {
         assert!(params.contains(&("labels".into(), "\"read later\"".into())));
         assert!(!params.iter().any(|(key, _)| key == "is_archived"));
         assert!(!params.iter().any(|(key, _)| key == "read_status"));
+    }
+
+    #[test]
+    fn parses_search_filters() {
+        let query = SearchQuery::parse(
+            "rust type:VIDEO lang:de status:read is:favorite has:labels \
+             after:-7d before:2026-01-01 id:abc",
+        );
+        assert_eq!(query.text, "rust");
+        assert_eq!(query.types, vec!["video"]);
+        assert_eq!(query.lang.as_deref(), Some("de"));
+        assert_eq!(query.read_status, vec!["read"]);
+        assert_eq!(query.is_marked, Some(true));
+        assert_eq!(query.has_labels, Some(true));
+        assert_eq!(query.range_start.as_deref(), Some("-7d"));
+        assert_eq!(query.range_end.as_deref(), Some("2026-01-01"));
+        assert_eq!(query.ids, vec!["abc"]);
+        assert!(query.error.is_none());
+
+        let query = SearchQuery::parse(
+            "title:rust https://example.com/foo label:\"read later\" -cat",
+        );
+        assert_eq!(
+            query.text,
+            "title:rust https://example.com/foo label:\"read later\" -cat"
+        );
+        assert!(query.types.is_empty());
+        assert!(query.ids.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_filter_values() {
+        assert!(SearchQuery::parse("type:gif").error.is_some());
+        assert!(SearchQuery::parse("status:done").error.is_some());
+        assert!(SearchQuery::parse("is:hot").error.is_some());
+        assert!(SearchQuery::parse("has:images").error.is_some());
+        assert!(
+            SearchQuery::parse("type:article status:read")
+                .error
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn search_filters_override_the_view_and_set_parameters() {
+        let query = BookmarkQuery::new(
+            &Filter::Unread,
+            &SearchQuery::parse(
+                "term lang:de has:notes is:archived is:loaded after:-1w \
+                 before:2026-01-01 id:a id:b type:photo status:read",
+            ),
+            Sort::Newest,
+            10,
+            0,
+        );
+        let params = query.params();
+        assert!(params.contains(&("search".into(), "term".into())));
+        assert!(params.contains(&("lang".into(), "de".into())));
+        assert!(params.contains(&("has_notes".into(), "true".into())));
+        assert!(params.contains(&("is_loaded".into(), "true".into())));
+        assert!(params.contains(&("range_start".into(), "-1w".into())));
+        assert!(params.contains(&("range_end".into(), "2026-01-01".into())));
+        assert!(params.contains(&("id".into(), "a".into())));
+        assert!(params.contains(&("id".into(), "b".into())));
+        assert!(params.contains(&("type".into(), "photo".into())));
+        // The search overrides the Unread view.
+        assert!(params.contains(&("is_archived".into(), "true".into())));
+        assert!(params.contains(&("read_status".into(), "read".into())));
+    }
+
+    #[test]
+    fn search_query_matches_cached_bookmarks() {
+        let bookmark = Bookmark {
+            id: "one".into(),
+            document_type: "photo".into(),
+            lang: "de".into(),
+            is_marked: true,
+            is_archived: true,
+            loaded: true,
+            title: Some("Rust notes".into()),
+            labels: vec!["rust".into()],
+            note: Some("note".into()),
+            created: Some("2026-01-15T00:00:00Z".parse().unwrap()),
+            ..Default::default()
+        };
+        assert!(SearchQuery::parse("type:photo").matches(&bookmark));
+        assert!(!SearchQuery::parse("type:video").matches(&bookmark));
+        assert!(SearchQuery::parse("lang:de").matches(&bookmark));
+        assert!(SearchQuery::parse("lang:d*").matches(&bookmark));
+        assert!(!SearchQuery::parse("lang:en").matches(&bookmark));
+        assert!(SearchQuery::parse("status:unread").matches(&bookmark));
+        assert!(!SearchQuery::parse("status:read").matches(&bookmark));
+        assert!(
+            SearchQuery::parse("is:favorite is:archived is:loaded")
+                .matches(&bookmark)
+        );
+        assert!(SearchQuery::parse("has:labels has:notes").matches(&bookmark));
+        assert!(SearchQuery::parse("RUST").matches(&bookmark));
+        assert!(!SearchQuery::parse("has:errors").matches(&bookmark));
+        assert!(SearchQuery::parse("id:one").matches(&bookmark));
+        assert!(!SearchQuery::parse("id:two").matches(&bookmark));
+        assert!(
+            SearchQuery::parse("after:2026-01-01 before:2026-02-01")
+                .matches(&bookmark)
+        );
+        assert!(!SearchQuery::parse("after:2026-02-01").matches(&bookmark));
+        assert!(!SearchQuery::parse("before:2026-01-01").matches(&bookmark));
     }
 
     #[test]

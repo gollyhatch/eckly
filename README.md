@@ -256,6 +256,28 @@ first.
 | `r` | Refresh bookmarks, labels, collections and profile |
 | `q` | Quit |
 
+### Search filters
+
+The `/` search box sends free text to Readeck's full-text search and also
+understands `key:value` filters anywhere in the query:
+
+| Filter | Values | Effect |
+| --- | --- | --- |
+| `type:` | `article`, `photo`, `video` | Bookmark type (repeatable) |
+| `lang:` | language code, `*` wildcard | Bookmark language |
+| `status:` | `unread`, `reading`, `read` | Reading progress (repeatable) |
+| `is:` | `favorite`, `archived`, `loaded` | Flags |
+| `has:` | `labels`, `notes`, `errors` | Content present |
+| `after:`, `before:` | time token (`-7d`, `now`, `2026-01-01`) | Creation date range |
+| `id:` | bookmark ID | Match specific bookmarks |
+
+A filter replaces the matching option of the current view: `is:archived`
+searches the archive from any view, and `status:read` replaces the progress
+filter. Everything else is passed to Readeck unchanged, so its field syntax
+(`title:`, `author:`, `site:`, `label:`, `note:`), quoted phrases, `*` wildcards
+and `-` negation keep working. The filters also apply to the offline cache;
+field terms are server-side only, so offline they are matched as plain text.
+
 ### Filter sidebar
 
 | Key | Action |
