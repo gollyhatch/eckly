@@ -475,6 +475,32 @@ impl ReadeckClient {
         Ok(response.json::<Vec<Label>>().await?)
     }
 
+    /// Rename a label on every bookmark that carries it.
+    pub async fn rename_label(
+        &self,
+        name: &str,
+        new_name: &str,
+    ) -> Result<(), ApiError> {
+        let mut url = url::Url::parse(&self.endpoint("/bookmarks/labels/"))
+            .map_err(|err| ApiError::InvalidUrl(err.to_string()))?;
+        {
+            let mut segments = url.path_segments_mut().map_err(|_| {
+                ApiError::InvalidUrl(
+                    "server URL cannot hold path segments".into(),
+                )
+            })?;
+            segments.pop_if_empty().push(name);
+        }
+        self.send_ok(
+            self.http
+                .patch(url)
+                .bearer_auth(self.token.as_ref())
+                .json(&serde_json::json!({ "name": new_name })),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn collections(&self) -> Result<Vec<Collection>, ApiError> {
         let response = self
             .send_ok(
@@ -846,6 +872,22 @@ mod tests {
         let request = server.await.unwrap();
         assert!(request.starts_with("GET /api/bookmarks/sync?"));
         assert!(request.contains("since=2026-11-14T20%3A00%3A00.000000000Z"));
+    }
+
+    #[tokio::test]
+    async fn renames_labels_over_http() {
+        let (base, server) =
+            serve_once(response("200 OK", "", r#"{"name":"reading"}"#), true)
+                .await;
+
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        client.rename_label("read later", "reading").await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(
+            request.starts_with("PATCH /api/bookmarks/labels/read%20later ")
+        );
+        assert!(request.contains("\"name\":\"reading\""));
     }
 
     #[tokio::test]

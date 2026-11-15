@@ -265,6 +265,7 @@ first.
 | `Ctrl+u` / `Ctrl+d` | Move half a page |
 | `g` / `G` | First / last filter |
 | `/` | Filter labels and collections |
+| `R` | Rename the selected label |
 | `Enter` / `l` / `→` | Apply the selected filter |
 | `Tab` | Return to the bookmark list |
 | `Esc` / `h` / `←` | Clear the library filter, then return |

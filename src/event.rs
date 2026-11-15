@@ -53,6 +53,11 @@ pub enum ApiEvent {
         quiet: bool,
         result: Result<(), ApiError>,
     },
+    LabelRenamed {
+        from: String,
+        to: String,
+        result: Result<(), ApiError>,
+    },
     BulkUpdated {
         ids: Vec<String>,
         patch: BookmarkPatch,

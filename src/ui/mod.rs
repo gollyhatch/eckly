@@ -206,7 +206,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 
     let hints = match app.focus {
         crate::app::Focus::Sidebar => {
-            "  j/k move · / filter · Enter apply · PgUp/PgDn page · Ctrl+d/u half page · Tab/Esc back · ? help"
+            "  j/k move · / filter · Enter apply · R rename label · PgUp/PgDn page · Ctrl+d/u · Tab/Esc back · ? help"
         }
         crate::app::Focus::List => {
             "  j/k move · Space select · Enter read · m read · f favorite · a archive · t labels · / search · n add · Tab filters · ? help"

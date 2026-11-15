@@ -61,6 +61,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         binding("Ctrl+d/u", "Half page down / up"),
         binding("Tab", "Focus filters"),
         binding("Enter", "Open / apply"),
+        binding("R", "Rename label"),
         binding("Esc", "Back / close"),
         Line::from(""),
         section("Bookmarks"),
@@ -78,7 +79,6 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         binding("D", "Delete selected"),
         binding("o", "Open in browser"),
         binding("r", "Refresh"),
-        Line::from(""),
         Line::from(Span::styled(
             "a/f/t/m/D apply to selected items.",
             Style::new().fg(theme::dim()),
@@ -301,7 +301,12 @@ fn draw_input(frame: &mut Frame, area: Rect, input: &InputModal) {
         ),
         Span::styled(" cancel", Style::new().fg(theme::dim())),
     ];
-    if matches!(input.kind, InputKind::Search | InputKind::EditLabels { .. }) {
+    if matches!(
+        input.kind,
+        InputKind::Search
+            | InputKind::EditLabels { .. }
+            | InputKind::RenameLabel { .. }
+    ) {
         hints.push(Span::styled(
             "   Ctrl+w",
             Style::new()

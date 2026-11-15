@@ -178,6 +178,32 @@ impl Cache {
         self.state.labels = labels;
     }
 
+    /// Rename a label in cached labels and bookmarks, merging duplicates.
+    pub fn rename_label(&mut self, from: &str, to: &str) {
+        let mut labels: Vec<Label> =
+            Vec::with_capacity(self.state.labels.len());
+        for mut label in self.state.labels.drain(..) {
+            if label.name == from {
+                label.name = to.to_string();
+            }
+            match labels.iter_mut().find(|kept| kept.name == label.name) {
+                Some(existing) => existing.count += label.count,
+                None => labels.push(label),
+            }
+        }
+        self.state.labels = labels;
+
+        for bookmark in self.state.bookmarks.values_mut() {
+            for label in &mut bookmark.labels {
+                if label == from {
+                    *label = to.to_string();
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            bookmark.labels.retain(|label| seen.insert(label.clone()));
+        }
+    }
+
     pub fn set_collections(&mut self, collections: Vec<Collection>) {
         self.state.collections = collections;
     }
@@ -483,6 +509,37 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn renames_labels_and_merges_counts() {
+        let mut cache = temp_cache();
+        cache.set_labels(vec![
+            Label {
+                name: "old".into(),
+                count: 2,
+            },
+            Label {
+                name: "keep".into(),
+                count: 3,
+            },
+        ]);
+        cache.upsert_bookmarks(&[Bookmark {
+            id: "one".into(),
+            labels: vec!["old".into(), "keep".into()],
+            ..Default::default()
+        }]);
+
+        cache.rename_label("old", "keep");
+
+        let labels = cache.labels();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].name, "keep");
+        assert_eq!(labels[0].count, 5);
+
+        let bookmarks = cache.local_bookmarks(&Filter::All, "", Sort::Newest);
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].labels, vec!["keep".to_string()]);
     }
 
     #[test]

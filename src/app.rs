@@ -490,6 +490,7 @@ pub enum InputKind {
     EditLabels { ids: Vec<String> },
     EditNote { id: String },
     EditTitle { id: String },
+    RenameLabel { from: String },
 }
 
 pub struct App {
@@ -1223,6 +1224,7 @@ impl App {
                 self.apply_sidebar_selection()
             }
             KeyCode::Char('r') => self.refresh_all(),
+            KeyCode::Char('R') => self.rename_selected_label(),
             KeyCode::Char('/') => {
                 self.sidebar_search_active = true;
                 self.sidebar_search.cursor = self.sidebar_search.char_len();
@@ -2277,6 +2279,97 @@ impl App {
         self.modal = Some(Modal::Input(modal));
     }
 
+    fn rename_selected_label(&mut self) {
+        let name = self
+            .sidebar_items
+            .get(self.sidebar_state.selected().unwrap_or(0))
+            .and_then(|item| match &item.filter {
+                Some(Filter::Label(name)) => Some(name.clone()),
+                _ => None,
+            });
+        let Some(name) = name else {
+            self.toast_info("Select a label to rename");
+            return;
+        };
+        self.modal = Some(Modal::Input(InputModal::new(
+            "Rename label",
+            "New label name",
+            TextInput::new(name.clone()),
+            InputKind::RenameLabel { from: name },
+        )));
+    }
+
+    fn rename_label(&mut self, from: String, to: String) {
+        if self.offline_mode || self.offline {
+            self.toast_error(
+                "Renaming a label requires a connection to Readeck",
+            );
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.toast_error(
+                "Renaming a label requires a connection to Readeck",
+            );
+            return;
+        };
+        self.toast_info(format!("Renaming #{from}…"));
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.rename_label(&from, &to).await;
+            let _ = tx.send(Event::api(ApiEvent::LabelRenamed {
+                from,
+                to,
+                result,
+            }));
+        });
+    }
+
+    fn apply_label_rename(&mut self, from: &str, to: &str) {
+        let mut labels: Vec<Label> = Vec::with_capacity(self.labels.len());
+        for mut label in self.labels.drain(..) {
+            if label.name == from {
+                label.name = to.to_string();
+            }
+            match labels.iter_mut().find(|kept| kept.name == label.name) {
+                Some(existing) => existing.count += label.count,
+                None => labels.push(label),
+            }
+        }
+        self.labels = labels;
+
+        for bookmark in &mut self.bookmarks {
+            for label in &mut bookmark.labels {
+                if label == from {
+                    *label = to.to_string();
+                }
+            }
+            let mut seen = HashSet::new();
+            bookmark.labels.retain(|label| seen.insert(label.clone()));
+        }
+
+        if let Filter::Label(name) = &mut self.filter {
+            if name == from {
+                *name = to.to_string();
+            }
+        }
+
+        if let Some(cache) = &mut self.cache {
+            cache.rename_label(from, to);
+            let _ = cache.save();
+        }
+
+        self.rebuild_sidebar();
+        let renamed = Filter::Label(to.to_string());
+        if let Some(index) = self
+            .sidebar_items
+            .iter()
+            .position(|item| item.filter.as_ref() == Some(&renamed))
+        {
+            self.sidebar_state.select(Some(index));
+            *self.sidebar_state.offset_mut() = 0;
+        }
+    }
+
     fn refresh_label_suggestions(&self, modal: &mut InputModal) {
         if !matches!(modal.kind, InputKind::EditLabels { .. }) {
             modal.suggestions.clear();
@@ -2433,6 +2526,16 @@ impl App {
                     ..Default::default()
                 };
                 self.update_bookmark(id, patch, "Title updated", false);
+            }
+            InputKind::RenameLabel { from } => {
+                if value.is_empty() {
+                    self.toast_error("The label name cannot be empty.");
+                    return;
+                }
+                if value == from {
+                    return;
+                }
+                self.rename_label(from, value);
             }
         }
     }
@@ -2943,6 +3046,19 @@ impl App {
                     } else if !self.handle_unauthorized(&err) {
                         self.toast_error(err.to_string());
                         self.request_bookmarks(false, true);
+                    }
+                }
+            },
+            ApiEvent::LabelRenamed { from, to, result } => match result {
+                Ok(()) => {
+                    self.apply_label_rename(&from, &to);
+                    self.toast_success(format!("Renamed #{from} to #{to}"));
+                }
+                Err(err) => {
+                    if !self.handle_unauthorized(&err) {
+                        self.toast_error(format!(
+                            "Could not rename the label: {err}"
+                        ));
                     }
                 }
             },
@@ -4000,6 +4116,84 @@ mod tests {
         // Left border, the " / " prompt, then the four typed characters.
         let position = terminal.backend_mut().get_cursor_position().unwrap();
         assert_eq!((position.x, position.y), (8, 2));
+    }
+
+    #[test]
+    fn renaming_a_label_updates_local_state() {
+        let mut app = test_app_with_bookmarks(1);
+        app.labels = vec![
+            Label {
+                name: "old".into(),
+                count: 2,
+            },
+            Label {
+                name: "keep".into(),
+                count: 1,
+            },
+        ];
+        app.bookmarks[0].labels = vec!["old".into(), "keep".into()];
+        app.filter = Filter::Label("old".into());
+        app.rebuild_sidebar();
+
+        app.apply_label_rename("old", "new");
+
+        assert!(app.labels.iter().any(|l| l.name == "new" && l.count == 2));
+        assert!(!app.labels.iter().any(|l| l.name == "old"));
+        assert_eq!(
+            app.bookmarks[0]
+                .labels
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["new", "keep"]
+        );
+        assert_eq!(app.filter, Filter::Label("new".into()));
+        let selected = app.sidebar_state.selected().unwrap();
+        assert_eq!(app.sidebar_items[selected].text, "# new");
+
+        // Renaming onto an existing label merges both lists.
+        app.apply_label_rename("new", "keep");
+        assert_eq!(app.labels.len(), 1);
+        assert_eq!(app.labels[0].name, "keep");
+        assert_eq!(app.labels[0].count, 3);
+        assert_eq!(
+            app.bookmarks[0]
+                .labels
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["keep"]
+        );
+    }
+
+    #[test]
+    fn rename_key_opens_the_label_prompt() {
+        let mut app = test_app_with_bookmarks(1);
+        app.labels = vec![Label {
+            name: "rust".into(),
+            count: 1,
+        }];
+        app.focus = Focus::Sidebar;
+        app.rebuild_sidebar();
+        let index = app
+            .sidebar_items
+            .iter()
+            .position(|item| item.filter == Some(Filter::Label("rust".into())))
+            .unwrap();
+        app.sidebar_state.select(Some(index));
+
+        app.handle_sidebar_key(KeyEvent::new(
+            KeyCode::Char('R'),
+            KeyModifiers::SHIFT,
+        ));
+
+        match app.modal.as_ref().unwrap() {
+            Modal::Input(input) => {
+                assert_eq!(input.input.value, "rust");
+                assert!(matches!(input.kind, InputKind::RenameLabel { .. }));
+            }
+            _ => panic!("expected an input modal"),
+        }
     }
 
     #[test]
