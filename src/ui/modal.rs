@@ -288,7 +288,7 @@ fn draw_input(frame: &mut Frame, area: Rect, input: &InputModal) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 super::truncate_width(
-                    "Filters: type: lang: status: is: has: after: before:",
+                    "Filters: type: lang: status: is: has: label: after: before:",
                     suggestion_area.width as usize,
                 ),
                 Style::new().fg(theme::faint()),

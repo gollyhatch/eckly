@@ -398,12 +398,13 @@ impl Sort {
 ///
 /// Free text and unrecognized `field:value` terms stay in [`Self::text`] and
 /// are sent as the API `search` parameter, so Readeck's own query syntax
-/// (`title:`, `author:`, `site:`, `label:`, `note:`, quotes, wildcards and
+/// (`title:`, `author:`, `site:`, `note:`, quotes, wildcards and
 /// negation) keeps working.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchQuery {
     pub text: String,
     pub types: Vec<String>,
+    pub labels: Vec<String>,
     pub lang: Option<String>,
     pub read_status: Vec<String>,
     pub is_marked: Option<bool>,
@@ -423,15 +424,15 @@ impl SearchQuery {
     pub fn parse(input: &str) -> Self {
         let mut query = Self::default();
         let mut text = Vec::new();
-        for token in input.split_whitespace() {
+        for token in tokenize(input) {
             let Some((key, value)) = token.split_once(':') else {
-                text.push(token.to_string());
+                text.push(token);
                 continue;
             };
             let key = key.to_ascii_lowercase();
             let value = unquote_value(value);
             if value.is_empty() {
-                text.push(token.to_string());
+                text.push(token);
                 continue;
             }
             let lower = value.to_ascii_lowercase();
@@ -443,6 +444,7 @@ impl SearchQuery {
                     _ => query.fail("type", &lower, "article, photo or video"),
                 },
                 "lang" => query.lang = Some(value.to_string()),
+                "label" | "labels" => query.push_label(value),
                 "status" => match lower.as_str() {
                     "unread" => query.push_status("unread"),
                     "reading" => query.push_status("reading"),
@@ -473,7 +475,7 @@ impl SearchQuery {
                     }
                 }
                 // Field terms and unknown prefixes remain full-text terms.
-                _ => text.push(token.to_string()),
+                _ => text.push(token),
             }
             if query.error.is_some() {
                 return query;
@@ -486,6 +488,16 @@ impl SearchQuery {
     fn push_type(&mut self, kind: &str) {
         if !self.types.iter().any(|existing| existing == kind) {
             self.types.push(kind.to_string());
+        }
+    }
+
+    fn push_label(&mut self, label: &str) {
+        if !self
+            .labels
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(label))
+        {
+            self.labels.push(label.to_string());
         }
     }
 
@@ -519,6 +531,16 @@ impl SearchQuery {
             if !wildcard_eq(lang, &bookmark.lang) {
                 return false;
             }
+        }
+        if !self.labels.is_empty()
+            && !self.labels.iter().all(|label| {
+                bookmark
+                    .labels
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case(label))
+            })
+        {
+            return false;
         }
         if !self.read_status.is_empty() {
             let status = match bookmark.status() {
@@ -571,6 +593,38 @@ impl SearchQuery {
         }
         true
     }
+}
+
+/// Split a query into tokens, keeping quoted strings together.
+fn tokenize(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    for ch in input.chars() {
+        match quote {
+            Some(delim) => {
+                current.push(ch);
+                if ch == delim {
+                    quote = None;
+                }
+            }
+            None if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => {
+                current.push(ch);
+                if ch == '"' || ch == '\'' {
+                    quote = Some(ch);
+                }
+            }
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 fn unquote_value(value: &str) -> &str {
@@ -783,6 +837,18 @@ impl BookmarkQuery {
         let search = search.clone();
         if !search.text.is_empty() {
             query.search = Some(search.text);
+        }
+        if !search.labels.is_empty() {
+            let labels = search
+                .labels
+                .iter()
+                .map(|label| quote_label(label))
+                .collect::<Vec<_>>()
+                .join(" ");
+            query.labels = Some(match query.labels.take() {
+                Some(view) => format!("{view} {labels}"),
+                None => labels,
+            });
         }
         // Search filters override the view they are combined with.
         if !search.types.is_empty() {
@@ -997,12 +1063,39 @@ mod tests {
         let query = SearchQuery::parse(
             "title:rust https://example.com/foo label:\"read later\" -cat",
         );
-        assert_eq!(
-            query.text,
-            "title:rust https://example.com/foo label:\"read later\" -cat"
-        );
+        assert_eq!(query.text, "title:rust https://example.com/foo -cat");
+        assert_eq!(query.labels, vec!["read later"]);
         assert!(query.types.is_empty());
         assert!(query.ids.is_empty());
+    }
+
+    #[test]
+    fn parses_quoted_label_filters() {
+        let query =
+            SearchQuery::parse("label:\"read later\" label:rust labels:tui");
+        assert_eq!(query.text, "");
+        assert_eq!(query.labels, vec!["read later", "rust", "tui"]);
+        assert!(query.error.is_none());
+
+        let query =
+            SearchQuery::parse("title:\"read later\" label:\"read later\"");
+        assert_eq!(query.text, "title:\"read later\"");
+        assert_eq!(query.labels, vec!["read later"]);
+    }
+
+    #[test]
+    fn label_filters_combine_with_the_view() {
+        let query = BookmarkQuery::new(
+            &Filter::Label("view".into()),
+            &SearchQuery::parse("label:rust label:\"read later\""),
+            Sort::Newest,
+            10,
+            0,
+        );
+        assert!(query.params().contains(&(
+            "labels".into(),
+            "\"view\" \"rust\" \"read later\"".into(),
+        )));
     }
 
     #[test]
@@ -1074,6 +1167,9 @@ mod tests {
         assert!(SearchQuery::parse("has:labels has:notes").matches(&bookmark));
         assert!(SearchQuery::parse("RUST").matches(&bookmark));
         assert!(!SearchQuery::parse("has:errors").matches(&bookmark));
+        assert!(SearchQuery::parse("label:rust").matches(&bookmark));
+        assert!(SearchQuery::parse("label:RUST").matches(&bookmark));
+        assert!(!SearchQuery::parse("label:tui").matches(&bookmark));
         assert!(SearchQuery::parse("id:one").matches(&bookmark));
         assert!(!SearchQuery::parse("id:two").matches(&bookmark));
         assert!(

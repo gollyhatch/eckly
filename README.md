@@ -265,6 +265,7 @@ understands `key:value` filters anywhere in the query:
 | --- | --- | --- |
 | `type:` | `article`, `photo`, `video` | Bookmark type (repeatable) |
 | `lang:` | language code, `*` wildcard | Bookmark language |
+| `label:` | label name (quote names with spaces) | Bookmark labels (repeatable) |
 | `status:` | `unread`, `reading`, `read` | Reading progress (repeatable) |
 | `is:` | `favorite`, `archived`, `loaded` | Flags |
 | `has:` | `labels`, `notes`, `errors` | Content present |
@@ -274,7 +275,7 @@ understands `key:value` filters anywhere in the query:
 A filter replaces the matching option of the current view: `is:archived`
 searches the archive from any view, and `status:read` replaces the progress
 filter. Everything else is passed to Readeck unchanged, so its field syntax
-(`title:`, `author:`, `site:`, `label:`, `note:`), quoted phrases, `*` wildcards
+(`title:`, `author:`, `site:`, `note:`), quoted phrases, `*` wildcards
 and `-` negation keep working. The filters also apply to the offline cache;
 field terms are server-side only, so offline they are matched as plain text.
 
