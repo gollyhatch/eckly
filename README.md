@@ -92,8 +92,9 @@ reader to toggle alignment for the current session.
 
 `speed_read_wpm` sets the speed reading pace in words per minute (default
 `300`). Press `s` in the reader to show one word at a time, starting at the
-current position. `Space` pauses or resumes, `+`/`-` change the pace for the
-session, and `Esc` returns to the article at the word you reached.
+current position. `Space` pauses or resumes, `h`/`l` or `←`/`→` step one word,
+`+`/`-` change the pace for the session, and `Esc` returns to the article at
+the word you reached.
 
 Credentials can also be supplied per run:
 
@@ -296,8 +297,9 @@ progress or archive status.
 | `Esc` | Clear the article search, then return to the list |
 | `q` | Return to the list |
 
-While speed reading, `Space` pauses or resumes, `+` / `-` change the pace by 25
-words per minute, and `s` or `Esc` returns to the article.
+While speed reading, `Space` pauses or resumes, `h`/`l` (or `←`/`→`) step one
+word and pause, `+` / `-` change the pace by 25 words per minute, and `s` or
+`Esc` returns to the article.
 
 ### General
 

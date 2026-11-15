@@ -1810,6 +1810,8 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('s') => self.stop_speed_reading(),
             KeyCode::Char(' ') => self.toggle_speed_play(),
+            KeyCode::Char('h') | KeyCode::Left => self.step_speed_reading(-1),
+            KeyCode::Char('l') | KeyCode::Right => self.step_speed_reading(1),
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.adjust_speed_wpm(WPM_STEP)
             }
@@ -1843,6 +1845,13 @@ impl App {
         if let Some(speed) = self.reader.as_mut().and_then(|r| r.speed.as_mut())
         {
             speed.toggle_play(Instant::now());
+        }
+    }
+
+    fn step_speed_reading(&mut self, delta: isize) {
+        if let Some(speed) = self.reader.as_mut().and_then(|r| r.speed.as_mut())
+        {
+            speed.step(delta);
         }
     }
 

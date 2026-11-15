@@ -97,6 +97,13 @@ impl SpeedReader {
         self.next_due = now + self.interval();
     }
 
+    /// Move one word and pause. Stepping past either end stays put.
+    pub fn step(&mut self, delta: isize) {
+        self.playing = false;
+        let last = self.words.len().saturating_sub(1) as isize;
+        self.index = (self.index as isize + delta).clamp(0, last) as usize;
+    }
+
     pub fn set_wpm(&mut self, wpm: u16, now: Instant) {
         self.wpm = clamp_wpm(wpm);
         if self.playing {
@@ -229,6 +236,26 @@ mod tests {
         assert_eq!(speed.current(), "one");
         speed.advance(start + Duration::from_millis(101));
         assert_eq!(speed.current(), "two");
+    }
+
+    #[test]
+    fn steps_manually_and_pauses() {
+        let lines = lines(&["one two three"]);
+        let start = Instant::now();
+        let mut speed = SpeedReader::new_at(&lines, 0, 300, start).unwrap();
+        assert!(speed.playing());
+
+        speed.step(1);
+        assert!(!speed.playing());
+        assert_eq!(speed.current(), "two");
+        speed.step(1);
+        assert_eq!(speed.current(), "three");
+        speed.step(1);
+        assert_eq!(speed.current(), "three");
+        speed.step(-2);
+        assert_eq!(speed.current(), "one");
+        speed.step(-1);
+        assert_eq!(speed.current(), "one");
     }
 
     #[test]
