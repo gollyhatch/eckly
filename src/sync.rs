@@ -1,15 +1,18 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use clap::{ArgGroup, Args};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::api::ReadeckClient;
 use crate::cache::Cache;
 use crate::config::Config;
-use crate::models::{Bookmark, BookmarkQuery, Filter, Sort};
+use crate::models::{
+    Bookmark, BookmarkQuery, Filter, Sort, SyncChange, SyncChangeKind,
+};
 
 const PAGE_SIZE: usize = 100;
 
@@ -18,7 +21,6 @@ const PROGRESS_TEMPLATE: &str = "{msg}\n{spinner:.green} [{elapsed_precise}] [{w
 #[derive(Debug, Args)]
 #[command(group(
     ArgGroup::new("source")
-        .required(true)
         .multiple(true)
         .args(["unread", "favorites", "archived", "all"])
 ))]
@@ -38,6 +40,13 @@ pub struct SyncArgs {
     /// Download every bookmark
     #[arg(long)]
     pub all: bool,
+}
+
+impl SyncArgs {
+    /// Without a list flag, sync only what changed since the last sync.
+    fn incremental(&self) -> bool {
+        !self.unread && !self.favorites && !self.archived && !self.all
+    }
 }
 
 pub async fn run(
@@ -62,80 +71,37 @@ pub async fn run(
 
     let interactive = std::io::stderr().is_terminal();
     upload_pending_changes(&client, &mut cache, interactive).await?;
-    let list_progress = make_progress(0, interactive);
-    let bookmarks =
-        match download_bookmark_lists(&client, args, &list_progress).await {
-            Ok(bookmarks) => {
-                list_progress.finish_with_message(format!(
-                    "Fetched {} bookmark(s)",
-                    bookmarks.len()
-                ));
-                bookmarks
-            }
-            Err(err) => {
-                list_progress.abandon_with_message("Failed to fetch bookmarks");
-                return Err(err);
-            }
-        };
-    let pending_updates = cache.pending_updates();
-    let pending_deletes: HashSet<String> =
-        cache.pending_deletes().into_iter().collect();
-    let mut bookmarks = bookmarks;
-    for bookmark in &mut bookmarks {
-        if let Some(patch) = pending_updates.get(&bookmark.id) {
-            bookmark.apply_patch(patch);
+
+    if !args.incremental() {
+        let filters = filters_for(args);
+        return sync_lists(
+            &client,
+            &mut cache,
+            &cache_dir,
+            filters,
+            interactive,
+        )
+        .await;
+    }
+
+    match cache.last_sync() {
+        Some(since) => {
+            sync_changes(&client, &mut cache, &cache_dir, since, interactive)
+                .await
+        }
+        // Without a watermark there is nothing to diff against, so take a
+        // complete snapshot instead.
+        None => {
+            sync_lists(
+                &client,
+                &mut cache,
+                &cache_dir,
+                vec![Filter::All],
+                interactive,
+            )
+            .await
         }
     }
-    bookmarks.retain(|bookmark| !pending_deletes.contains(&bookmark.id));
-    cache.upsert_bookmarks(&bookmarks);
-    if let Ok(labels) = client.labels().await {
-        cache.set_labels(labels);
-    }
-    if let Ok(collections) = client.collections().await {
-        cache.set_collections(collections);
-    }
-    cache.save().context("could not save bookmark cache")?;
-
-    let articles: Vec<Bookmark> = bookmarks
-        .into_iter()
-        .filter(|bookmark| bookmark.has_article)
-        .collect();
-    let progress = make_progress(articles.len() as u64, interactive);
-
-    if interactive && articles.is_empty() {
-        eprintln!("No articles to sync.");
-        return Ok(());
-    }
-
-    let mut errors = Vec::new();
-    let mut synced = 0;
-    progress.set_message("Downloading bookmarks...");
-    for bookmark in articles {
-        let title = bookmark.display_title();
-        match client.article(&bookmark.id).await {
-            Ok(html) => {
-                match Cache::write_article_to_dir(
-                    &cache_dir,
-                    &bookmark.id,
-                    &html,
-                ) {
-                    Ok(()) => synced += 1,
-                    Err(err) => errors.push(format!("{title}: {err:#}")),
-                }
-            }
-            Err(err) => errors.push(format!("{title}: {err}")),
-        }
-        progress.inc(1);
-    }
-    progress.finish_with_message(format!("Synced {synced} article(s)"));
-
-    if !errors.is_empty() {
-        for error in &errors {
-            eprintln!("{error}");
-        }
-        bail!("{} article(s) failed to sync", errors.len());
-    }
-    Ok(())
 }
 
 fn make_progress(len: u64, interactive: bool) -> ProgressBar {
@@ -152,7 +118,7 @@ fn make_progress(len: u64, interactive: bool) -> ProgressBar {
 }
 
 fn filters_for(args: &SyncArgs) -> Vec<Filter> {
-    if args.all {
+    if args.all || args.incremental() {
         return vec![Filter::All];
     }
     let mut filters = Vec::new();
@@ -166,6 +132,203 @@ fn filters_for(args: &SyncArgs) -> Vec<Filter> {
         filters.push(Filter::Archived);
     }
     filters
+}
+
+/// Only a sync of every list yields a cache complete enough to advance the
+/// incremental watermark.
+fn is_complete_snapshot(filters: &[Filter]) -> bool {
+    filters.len() == 1 && filters[0] == Filter::All
+}
+
+/// Download the requested lists, cache their metadata and fetch missing
+/// article bodies.
+async fn sync_lists(
+    client: &ReadeckClient,
+    cache: &mut Cache,
+    cache_dir: &Path,
+    filters: Vec<Filter>,
+    interactive: bool,
+) -> Result<()> {
+    let complete = is_complete_snapshot(&filters);
+    // Taken before the snapshot so the next incremental run cannot miss a
+    // change that lands while the list is being paginated.
+    let watermark = if complete {
+        snapshot_watermark(client).await
+    } else {
+        None
+    };
+    let list_progress = make_progress(0, interactive);
+    let bookmarks =
+        match download_bookmark_lists(client, &filters, &list_progress).await {
+            Ok(bookmarks) => {
+                list_progress.finish_with_message(format!(
+                    "Fetched {} bookmark(s)",
+                    bookmarks.len()
+                ));
+                bookmarks
+            }
+            Err(err) => {
+                list_progress.abandon_with_message("Failed to fetch bookmarks");
+                return Err(err);
+            }
+        };
+    if complete {
+        let present: HashSet<&str> =
+            bookmarks.iter().map(|b| b.id.as_str()).collect();
+        cache.retain_bookmarks(|id| present.contains(id));
+    }
+    let bookmarks = merge_pending(cache, bookmarks);
+    cache.upsert_bookmarks(&bookmarks);
+    refresh_metadata(client, cache).await;
+    cache.save().context("could not save bookmark cache")?;
+
+    download_articles(client, cache_dir, bookmarks, interactive).await?;
+
+    if let Some(watermark) = watermark {
+        cache.set_last_sync(watermark);
+        cache.save().context("could not save bookmark cache")?;
+    }
+    Ok(())
+}
+
+/// Newest change time known to the server, used as the starting watermark for
+/// an incremental sync after a complete snapshot.
+///
+/// Best effort: servers without the change log simply never sync
+/// incrementally.
+async fn snapshot_watermark(client: &ReadeckClient) -> Option<DateTime<Utc>> {
+    client
+        .sync_changes(None)
+        .await
+        .ok()?
+        .into_iter()
+        .map(|change| change.time)
+        .max()
+}
+
+/// Apply only what the server reports as changed since the last sync.
+async fn sync_changes(
+    client: &ReadeckClient,
+    cache: &mut Cache,
+    cache_dir: &Path,
+    since: DateTime<Utc>,
+    interactive: bool,
+) -> Result<()> {
+    let progress = make_progress(0, interactive);
+    progress.set_message("Fetching changes...");
+    let changes = match client.sync_changes(Some(since)).await {
+        Ok(changes) => changes,
+        Err(err) => {
+            progress.abandon_with_message("Failed to fetch changes");
+            return Err(err).context("could not fetch changes from Readeck");
+        }
+    };
+    let changes = latest_changes(changes);
+    progress.set_length(changes.len() as u64);
+    progress.set_message("Fetching changed bookmarks...");
+
+    let pending_updates = cache.pending_updates();
+    let mut watermark = since;
+    let mut fetched = Vec::new();
+    let mut removed = 0;
+    let mut errors = Vec::new();
+
+    for change in changes {
+        watermark = watermark.max(change.time);
+        match change.kind {
+            SyncChangeKind::Delete => {
+                cache.remove_bookmark(&change.id);
+                removed += 1;
+            }
+            SyncChangeKind::Update => {
+                match client.bookmark(&change.id).await {
+                    Ok(mut bookmark) => {
+                        if let Some(patch) = pending_updates.get(&bookmark.id) {
+                            bookmark.apply_patch(patch);
+                        }
+                        fetched.push(bookmark);
+                    }
+                    // Deleted between the change log and this request.
+                    Err(err) if err.status() == Some(404) => {
+                        cache.remove_bookmark(&change.id);
+                        removed += 1;
+                    }
+                    Err(err) => errors.push(format!("{}: {err}", change.id)),
+                }
+            }
+        }
+        progress.inc(1);
+    }
+    progress.finish_with_message(format!(
+        "Fetched {} changed bookmark(s), removed {removed}",
+        fetched.len()
+    ));
+
+    let articles: Vec<Bookmark> = fetched
+        .iter()
+        .filter(|bookmark| {
+            bookmark.has_article && !cache.has_article(&bookmark.id)
+        })
+        .cloned()
+        .collect();
+    cache.upsert_bookmarks(&fetched);
+    refresh_metadata(client, cache).await;
+    cache.save().context("could not save bookmark cache")?;
+
+    if !errors.is_empty() {
+        for error in &errors {
+            eprintln!("{error}");
+        }
+        bail!("{} change(s) failed to sync", errors.len());
+    }
+
+    download_articles(client, cache_dir, articles, interactive).await?;
+
+    // Only advance the watermark once every change was applied; otherwise the
+    // next run would skip whatever failed here.
+    cache.set_last_sync(watermark);
+    cache.save().context("could not save bookmark cache")?;
+    Ok(())
+}
+
+/// Keep the newest entry per bookmark, oldest first.
+fn latest_changes(changes: Vec<SyncChange>) -> Vec<SyncChange> {
+    let mut latest: HashMap<String, SyncChange> = HashMap::new();
+    for change in changes {
+        match latest.get(&change.id) {
+            Some(existing) if existing.time >= change.time => {}
+            _ => {
+                latest.insert(change.id.clone(), change);
+            }
+        }
+    }
+    let mut changes: Vec<SyncChange> = latest.into_values().collect();
+    changes.sort_by_key(|change| change.time);
+    changes
+}
+
+async fn refresh_metadata(client: &ReadeckClient, cache: &mut Cache) {
+    if let Ok(labels) = client.labels().await {
+        cache.set_labels(labels);
+    }
+    if let Ok(collections) = client.collections().await {
+        cache.set_collections(collections);
+    }
+}
+
+/// Keep local edits that have not reached the server yet.
+fn merge_pending(cache: &Cache, bookmarks: Vec<Bookmark>) -> Vec<Bookmark> {
+    let pending_updates = cache.pending_updates();
+    let pending_deletes: HashSet<String> =
+        cache.pending_deletes().into_iter().collect();
+    let mut bookmarks = bookmarks;
+    for bookmark in &mut bookmarks {
+        if let Some(patch) = pending_updates.get(&bookmark.id) {
+            bookmark.apply_patch(patch);
+        }
+    }
+    bookmarks.retain(|bookmark| !pending_deletes.contains(&bookmark.id));
+    bookmarks
 }
 
 async fn upload_pending_changes(
@@ -240,7 +403,7 @@ async fn upload_pending_changes(
 
 async fn download_bookmark_lists(
     client: &ReadeckClient,
-    args: &SyncArgs,
+    filters: &[Filter],
     progress: &ProgressBar,
 ) -> Result<Vec<Bookmark>> {
     let mut seen = HashSet::new();
@@ -248,16 +411,11 @@ async fn download_bookmark_lists(
     let mut expected_total = 0u64;
     progress.set_message("Fetching bookmark list...");
 
-    for filter in filters_for(args) {
+    for filter in filters {
         let mut offset = 0;
         loop {
-            let query = BookmarkQuery::new(
-                &filter,
-                "",
-                Sort::Newest,
-                PAGE_SIZE,
-                offset,
-            );
+            let query =
+                BookmarkQuery::new(filter, "", Sort::Newest, PAGE_SIZE, offset);
             let page =
                 client.list_bookmarks(&query).await.with_context(|| {
                     format!("could not list bookmarks for {}", filter.title())
@@ -285,6 +443,53 @@ async fn download_bookmark_lists(
     }
 
     Ok(bookmarks)
+}
+
+async fn download_articles(
+    client: &ReadeckClient,
+    cache_dir: &Path,
+    bookmarks: Vec<Bookmark>,
+    interactive: bool,
+) -> Result<()> {
+    let articles: Vec<Bookmark> = bookmarks
+        .into_iter()
+        .filter(|bookmark| bookmark.has_article)
+        .collect();
+    if interactive && articles.is_empty() {
+        eprintln!("No articles to sync.");
+        return Ok(());
+    }
+
+    let progress = make_progress(articles.len() as u64, interactive);
+    let mut errors = Vec::new();
+    let mut synced = 0;
+    progress.set_message("Downloading bookmarks...");
+    for bookmark in articles {
+        let title = bookmark.display_title();
+        match client.article(&bookmark.id).await {
+            Ok(html) => {
+                match Cache::write_article_to_dir(
+                    cache_dir,
+                    &bookmark.id,
+                    &html,
+                ) {
+                    Ok(()) => synced += 1,
+                    Err(err) => errors.push(format!("{title}: {err:#}")),
+                }
+            }
+            Err(err) => errors.push(format!("{title}: {err}")),
+        }
+        progress.inc(1);
+    }
+    progress.finish_with_message(format!("Synced {synced} article(s)"));
+
+    if !errors.is_empty() {
+        for error in &errors {
+            eprintln!("{error}");
+        }
+        bail!("{} article(s) failed to sync", errors.len());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -328,5 +533,54 @@ mod tests {
             filters_for(&args(false, false, true, false)),
             vec![Filter::Archived]
         );
+    }
+
+    #[test]
+    fn no_flags_selects_the_whole_library() {
+        let incremental = args(false, false, false, false);
+        assert!(incremental.incremental());
+        assert_eq!(filters_for(&incremental), vec![Filter::All]);
+        assert!(is_complete_snapshot(&filters_for(&incremental)));
+        assert!(!is_complete_snapshot(&filters_for(&args(
+            true, false, false, false
+        ))));
+    }
+
+    #[test]
+    fn parses_the_change_log() {
+        let changes: Vec<SyncChange> = serde_json::from_str(
+            r#"[
+                {"id":"one","time":"2026-11-14T21:18:09.039Z","type":"delete"},
+                {"id":"two","time":"2026-11-14T21:18:08.123456789Z","type":"update"}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].id, "one");
+        assert_eq!(changes[0].kind, SyncChangeKind::Delete);
+        assert_eq!(changes[1].kind, SyncChangeKind::Update);
+        assert_eq!(
+            changes[1].time.to_rfc3339(),
+            "2026-11-14T21:18:08.123456789+00:00"
+        );
+    }
+
+    #[test]
+    fn keeps_only_the_latest_change_per_bookmark() {
+        let changes: Vec<SyncChange> = serde_json::from_str(
+            r#"[
+                {"id":"one","time":"2026-11-14T10:00:00Z","type":"update"},
+                {"id":"one","time":"2026-11-14T11:00:00Z","type":"delete"},
+                {"id":"two","time":"2026-11-14T09:00:00Z","type":"update"}
+            ]"#,
+        )
+        .unwrap();
+        let changes = latest_changes(changes);
+        assert_eq!(changes.len(), 2);
+        // Sorted by time: two, then the newest change for one.
+        assert_eq!(changes[0].id, "two");
+        assert_eq!(changes[1].id, "one");
+        assert_eq!(changes[1].kind, SyncChangeKind::Delete);
+        assert_eq!(changes[1].time.to_rfc3339(), "2026-11-14T11:00:00+00:00");
     }
 }

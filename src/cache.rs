@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::models::{Bookmark, Collection, Filter, Label, Profile, Sort};
@@ -23,6 +24,9 @@ struct CacheState {
     profile: Option<Profile>,
     #[serde(default)]
     pending: PendingChanges,
+    /// Server time of the newest change covered by the last incremental sync.
+    #[serde(default)]
+    last_sync: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -46,6 +50,7 @@ impl CacheState {
             collections: Vec::new(),
             profile: None,
             pending: PendingChanges::default(),
+            last_sync: None,
         }
     }
 }
@@ -189,6 +194,32 @@ impl Cache {
         }
     }
 
+    pub fn last_sync(&self) -> Option<DateTime<Utc>> {
+        self.state.last_sync
+    }
+
+    pub fn set_last_sync(&mut self, at: DateTime<Utc>) {
+        self.state.last_sync = Some(at);
+    }
+
+    /// Drop every cached bookmark, and its article, that is no longer on the
+    /// server.
+    pub fn retain_bookmarks<F>(&mut self, keep: F)
+    where
+        F: Fn(&str) -> bool,
+    {
+        let stale: Vec<String> = self
+            .state
+            .bookmarks
+            .keys()
+            .filter(|id| !keep(id))
+            .cloned()
+            .collect();
+        for id in stale {
+            self.remove_bookmark(&id);
+        }
+    }
+
     pub fn apply_patch(
         &mut self,
         id: &str,
@@ -245,6 +276,8 @@ impl Cache {
 
     pub fn remove_bookmark(&mut self, id: &str) {
         self.state.bookmarks.remove(id);
+        self.state.pending.updates.remove(id);
+        self.state.pending.deletes.remove(id);
         let _ = self.remove_article(id);
     }
 
@@ -266,6 +299,10 @@ impl Cache {
 
     pub fn read_article(&self, id: &str) -> Option<String> {
         fs::read_to_string(self.article_path(id)).ok()
+    }
+
+    pub fn has_article(&self, id: &str) -> bool {
+        self.article_path(id).exists()
     }
 
     #[cfg(test)]
@@ -446,5 +483,29 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn pruning_drops_articles_of_removed_bookmarks() {
+        let mut cache = temp_cache();
+        let bookmarks: Vec<Bookmark> = ["one", "two"]
+            .into_iter()
+            .map(|id| Bookmark {
+                id: id.into(),
+                ..Default::default()
+            })
+            .collect();
+        cache.upsert_bookmarks(&bookmarks);
+        cache.write_article("one", "<p>one</p>").unwrap();
+        cache.write_article("two", "<p>two</p>").unwrap();
+
+        cache.retain_bookmarks(|id| id == "one");
+
+        assert_eq!(
+            cache.local_bookmarks(&Filter::All, "", Sort::Newest).len(),
+            1
+        );
+        assert!(cache.has_article("one"));
+        assert!(!cache.has_article("two"));
     }
 }

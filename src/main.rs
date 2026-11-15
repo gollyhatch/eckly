@@ -64,7 +64,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Download articles into the local cache for offline reading
+    /// Sync the local cache for offline reading (changed bookmarks by default)
     Sync(sync::SyncArgs),
 }
 

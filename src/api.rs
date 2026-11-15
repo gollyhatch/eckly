@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -8,6 +9,7 @@ use thiserror::Error;
 use crate::config::normalize_server;
 use crate::models::{
     Bookmark, BookmarkPatch, BookmarkQuery, Collection, Label, Page, Profile,
+    SyncChange,
 };
 
 const OAUTH_CLIENT_URI: &str = "https://github.com/gollyhatch/eckly";
@@ -263,6 +265,40 @@ impl ReadeckClient {
             total: if total == 0 { items.len() } else { total },
             items,
         })
+    }
+
+    /// Metadata for a single bookmark.
+    pub async fn bookmark(&self, id: &str) -> Result<Bookmark, ApiError> {
+        let response = self
+            .send_ok(
+                self.http
+                    .get(self.endpoint(&format!("/bookmarks/{id}")))
+                    .bearer_auth(self.token.as_ref()),
+            )
+            .await?;
+        Ok(response.json::<Bookmark>().await?)
+    }
+
+    /// The server's change log: bookmarks updated or deleted since a time.
+    ///
+    /// Without `since` the endpoint lists every bookmark as an update and
+    /// omits deletions, which makes it a complete snapshot of the library.
+    pub async fn sync_changes(
+        &self,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<SyncChange>, ApiError> {
+        let mut request = self
+            .http
+            .get(self.endpoint("/bookmarks/sync"))
+            .bearer_auth(self.token.as_ref());
+        if let Some(since) = since {
+            request = request.query(&[(
+                "since",
+                since.to_rfc3339_opts(SecondsFormat::Nanos, true),
+            )]);
+        }
+        let response = ensure_ok(request.send().await?).await?;
+        Ok(response.json::<Vec<SyncChange>>().await?)
     }
 
     /// The article body is an HTML fragment rather than a complete document.

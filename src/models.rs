@@ -254,6 +254,35 @@ pub struct Page<T> {
     pub total: usize,
 }
 
+/// One entry from `GET /api/bookmarks/sync`, the server's change log.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncChange {
+    pub id: String,
+    #[serde(deserialize_with = "deserialize_datetime")]
+    pub time: DateTime<Utc>,
+    #[serde(rename = "type")]
+    pub kind: SyncChangeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncChangeKind {
+    Update,
+    Delete,
+}
+
+fn deserialize_datetime<'de, D>(
+    deserializer: D,
+) -> Result<DateTime<Utc>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    DateTime::parse_from_rfc3339(&value)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(serde::de::Error::custom)
+}
+
 /// Which bookmarks to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Filter {
