@@ -96,9 +96,14 @@ impl ReadeckClient {
     fn build(server: &str, token: &str) -> Result<Self, ApiError> {
         let base = normalize_server(server)
             .map_err(|err| ApiError::InvalidUrl(err.to_string()))?;
+        // Readeck adds one `Link: ...; rel="media"` header per imported
+        // resource to article responses. Pages with many images exceed
+        // hyper's limits (100 headers / 16 KB), so allow generous ones.
         let http = reqwest::Client::builder()
             .user_agent(concat!("eckly/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(30))
+            .http1_max_headers(1024)
+            .http2_max_header_list_size(1024 * 1024)
             .build()?;
 
         Ok(Self {
@@ -841,6 +846,23 @@ mod tests {
         let request = server.await.unwrap();
         assert!(request.starts_with("GET /api/bookmarks/sync?"));
         assert!(request.contains("since=2026-11-14T20%3A00%3A00.000000000Z"));
+    }
+
+    #[tokio::test]
+    async fn accepts_article_responses_with_many_link_headers() {
+        let links: String = (0..150)
+            .map(|index| {
+                format!(
+                    "Link: <https://example.com/{index}.jpg>; rel=\"media\"\r\n"
+                )
+            })
+            .collect();
+        let (base, server) =
+            serve_once(response("200 OK", &links, "<p>body</p>"), false).await;
+
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        assert_eq!(client.article("one").await.unwrap(), "<p>body</p>");
+        let _ = server.await;
     }
 
     async fn serve_once(
