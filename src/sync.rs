@@ -140,8 +140,8 @@ fn is_complete_snapshot(filters: &[Filter]) -> bool {
     filters.len() == 1 && filters[0] == Filter::All
 }
 
-/// Download the requested lists, cache their metadata and fetch missing
-/// article bodies.
+/// Download the requested lists, cache their metadata and fetch new or
+/// changed article bodies.
 async fn sync_lists(
     client: &ReadeckClient,
     cache: &mut Cache,
@@ -150,12 +150,21 @@ async fn sync_lists(
     interactive: bool,
 ) -> Result<()> {
     let complete = is_complete_snapshot(&filters);
-    // Taken before the snapshot so the next incremental run cannot miss a
+    // Queried before the snapshot so the next incremental run cannot miss a
     // change that lands while the list is being paginated.
-    let watermark = if complete {
-        snapshot_watermark(client).await
-    } else {
-        None
+    let (changed, watermark) = match cache.last_sync() {
+        Some(since) => {
+            let (changed, newest) = changes_since(client, since).await;
+            (changed, complete.then(|| newest.unwrap_or(since)))
+        }
+        None => {
+            let newest = if complete {
+                snapshot_watermark(client).await
+            } else {
+                None
+            };
+            (HashSet::new(), newest)
+        }
     };
     let list_progress = make_progress(0, interactive);
     let bookmarks =
@@ -182,7 +191,11 @@ async fn sync_lists(
     refresh_metadata(client, cache).await;
     cache.save().context("could not save bookmark cache")?;
 
-    download_articles(client, cache_dir, bookmarks, interactive).await?;
+    let articles: Vec<Bookmark> = bookmarks
+        .into_iter()
+        .filter(|bookmark| needs_article(bookmark, &changed, cache))
+        .collect();
+    download_articles(client, cache_dir, articles, interactive).await?;
 
     if let Some(watermark) = watermark {
         cache.set_last_sync(watermark);
@@ -191,19 +204,48 @@ async fn sync_lists(
     Ok(())
 }
 
-/// Newest change time known to the server, used as the starting watermark for
-/// an incremental sync after a complete snapshot.
+/// An article is fetched when it is missing locally, or when its bookmark
+/// changed on the server since the last sync.
+fn needs_article(
+    bookmark: &Bookmark,
+    changed: &HashSet<String>,
+    cache: &Cache,
+) -> bool {
+    bookmark.has_article
+        && (changed.contains(&bookmark.id) || !cache.has_article(&bookmark.id))
+}
+
+/// Bookmark IDs updated since `since`, plus the server's time at response.
+///
+/// Best effort: on failure the caller keeps its existing watermark and
+/// re-fetches only missing articles.
+async fn changes_since(
+    client: &ReadeckClient,
+    since: DateTime<Utc>,
+) -> (HashSet<String>, Option<DateTime<Utc>>) {
+    match client.sync_changes(Some(since)).await {
+        Ok((changes, time)) => {
+            let changed = changes
+                .iter()
+                .filter(|change| change.kind == SyncChangeKind::Update)
+                .map(|change| change.id.clone())
+                .collect();
+            let time =
+                time.or_else(|| changes.iter().map(|change| change.time).max());
+            (changed, time)
+        }
+        Err(_) => (HashSet::new(), None),
+    }
+}
+
+/// The server's newest change time, used as the starting watermark for an
+/// incremental sync after a complete snapshot.
 ///
 /// Best effort: servers without the change log simply never sync
 /// incrementally.
 async fn snapshot_watermark(client: &ReadeckClient) -> Option<DateTime<Utc>> {
-    client
-        .sync_changes(None)
-        .await
-        .ok()?
-        .into_iter()
-        .map(|change| change.time)
-        .max()
+    let (changes, time) = client.sync_changes(None).await.ok()?;
+    time.or_else(|| changes.iter().map(|change| change.time).max())
 }
 
 /// Apply only what the server reports as changed since the last sync.
@@ -216,25 +258,32 @@ async fn sync_changes(
 ) -> Result<()> {
     let progress = make_progress(0, interactive);
     progress.set_message("Fetching changes...");
-    let changes = match client.sync_changes(Some(since)).await {
-        Ok(changes) => changes,
+    let (changes, server_time) = match client.sync_changes(Some(since)).await {
+        Ok(result) => result,
         Err(err) => {
             progress.abandon_with_message("Failed to fetch changes");
             return Err(err).context("could not fetch changes from Readeck");
         }
     };
+    // The server's clock at response time is the natural next `since`: it
+    // covers everything in this response without repeating it forever.
+    let watermark = server_time.unwrap_or_else(|| {
+        changes
+            .iter()
+            .map(|change| change.time)
+            .max()
+            .unwrap_or(since)
+    });
     let changes = latest_changes(changes);
     progress.set_length(changes.len() as u64);
     progress.set_message("Fetching changed bookmarks...");
 
     let pending_updates = cache.pending_updates();
-    let mut watermark = since;
     let mut fetched = Vec::new();
     let mut removed = 0;
     let mut errors = Vec::new();
 
     for change in changes {
-        watermark = watermark.max(change.time);
         match change.kind {
             SyncChangeKind::Delete => {
                 cache.remove_bookmark(&change.id);
@@ -264,11 +313,11 @@ async fn sync_changes(
         fetched.len()
     ));
 
+    // Everything here changed on the server since the last sync, so refresh
+    // its article too, even when a copy is already cached.
     let articles: Vec<Bookmark> = fetched
         .iter()
-        .filter(|bookmark| {
-            bookmark.has_article && !cache.has_article(&bookmark.id)
-        })
+        .filter(|bookmark| bookmark.has_article)
         .cloned()
         .collect();
     cache.upsert_bookmarks(&fetched);
@@ -582,5 +631,34 @@ mod tests {
         assert_eq!(changes[1].id, "one");
         assert_eq!(changes[1].kind, SyncChangeKind::Delete);
         assert_eq!(changes[1].time.to_rfc3339(), "2026-11-14T11:00:00+00:00");
+    }
+
+    #[test]
+    fn fetches_only_missing_or_changed_articles() {
+        let dir = std::env::temp_dir()
+            .join(format!("eckly-sync-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = Cache::new(dir.clone());
+        cache.write_article("stable", "<p>stable</p>").unwrap();
+        cache.write_article("touched", "<p>old</p>").unwrap();
+
+        let bookmark = |id: &str, has_article: bool| Bookmark {
+            id: id.into(),
+            has_article,
+            ..Default::default()
+        };
+        let changed: HashSet<String> =
+            ["touched".to_string()].into_iter().collect();
+
+        // Cached and unchanged: keep the local copy.
+        assert!(!needs_article(&bookmark("stable", true), &changed, &cache));
+        // Cached but changed on the server: refresh it.
+        assert!(needs_article(&bookmark("touched", true), &changed, &cache));
+        // Never downloaded: fetch it.
+        assert!(needs_article(&bookmark("new", true), &changed, &cache));
+        // Nothing to download.
+        assert!(!needs_article(&bookmark("new", false), &changed, &cache));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

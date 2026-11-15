@@ -177,8 +177,10 @@ launch. `r` reloads the cache from disk, which is useful after running
 The `sync` subcommand downloads bookmark metadata and article HTML without
 starting the TUI. Run without flags to sync incrementally: it replays Readeck's
 change log since the previous sync, applies updates, drops bookmarks deleted on
-the server, and downloads articles for new bookmarks. The first run has no
-watermark and therefore downloads the whole library.
+the server, and downloads the article of every new or changed bookmark.
+Articles already cached for unchanged bookmarks are left alone. The first run
+has no watermark, so it snapshots the whole library and downloads every article
+that is not cached yet.
 
 ```sh
 eckly sync                # everything that changed since the last sync

@@ -283,10 +283,13 @@ impl ReadeckClient {
     ///
     /// Without `since` the endpoint lists every bookmark as an update and
     /// omits deletions, which makes it a complete snapshot of the library.
+    ///
+    /// The server's clock at response time is returned with the entries so
+    /// callers can use it as the next `since`.
     pub async fn sync_changes(
         &self,
         since: Option<DateTime<Utc>>,
-    ) -> Result<Vec<SyncChange>, ApiError> {
+    ) -> Result<(Vec<SyncChange>, Option<DateTime<Utc>>), ApiError> {
         let mut request = self
             .http
             .get(self.endpoint("/bookmarks/sync"))
@@ -298,7 +301,14 @@ impl ReadeckClient {
             )]);
         }
         let response = ensure_ok(request.send().await?).await?;
-        Ok(response.json::<Vec<SyncChange>>().await?)
+        let time = response
+            .headers()
+            .get(reqwest::header::DATE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| DateTime::parse_from_rfc2822(value).ok())
+            .map(|value| value.with_timezone(&Utc));
+        let changes = response.json::<Vec<SyncChange>>().await?;
+        Ok((changes, time))
     }
 
     /// The article body is an HTML fragment rather than a complete document.
@@ -605,7 +615,7 @@ fn truncate(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Filter, Sort};
+    use crate::models::{Filter, Sort, SyncChangeKind};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -804,6 +814,33 @@ mod tests {
         assert!(error.is_no_article());
         assert_eq!(error.status(), Some(404));
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn reads_the_change_log_and_server_time() {
+        let body = r#"[
+            {"id":"one","time":"2026-11-14T21:18:09.039Z","type":"delete"},
+            {"id":"two","time":"2026-11-14T21:18:10.123456789Z","type":"update"}
+        ]"#;
+        let (base, server) = serve_once(
+            response("200 OK", "Date: Sat, 14 Nov 2026 21:18:11 GMT\r\n", body),
+            false,
+        )
+        .await;
+
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        let since = DateTime::parse_from_rfc3339("2026-11-14T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (changes, time) = client.sync_changes(Some(since)).await.unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].kind, SyncChangeKind::Delete);
+        assert_eq!(changes[1].kind, SyncChangeKind::Update);
+        assert_eq!(time.unwrap().to_rfc3339(), "2026-11-14T21:18:11+00:00");
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("GET /api/bookmarks/sync?"));
+        assert!(request.contains("since=2026-11-14T20%3A00%3A00.000000000Z"));
     }
 
     async fn serve_once(
