@@ -14,7 +14,6 @@ use ratatui::widgets::{Block, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Screen, ToastKind};
-use crate::config::display_server;
 use crate::models::Bookmark;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -46,14 +45,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_main(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let [header_area, body_area, footer_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(2),
-    ])
-    .areas(area);
+    let [body_area, footer_area] =
+        Layout::vertical([Constraint::Min(4), Constraint::Length(2)])
+            .areas(area);
 
-    draw_header(frame, app, header_area);
     draw_footer(frame, app, footer_area);
 
     let sidebar_width = sidebar_width(app, body_area.width);
@@ -65,105 +60,6 @@ fn draw_main(frame: &mut Frame, app: &mut App) {
 
     sidebar::draw(frame, app, sidebar_area);
     list::draw(frame, app, list_area);
-}
-
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
-    let right_width = if area.width >= 70 {
-        (area.width / 3).clamp(24, 44)
-    } else {
-        0
-    };
-    let [left_area, right_area] = if right_width > 0 {
-        Layout::horizontal([
-            Constraint::Min(20),
-            Constraint::Length(right_width),
-        ])
-        .areas(area)
-    } else {
-        [area, Rect::default()]
-    };
-
-    let mut left = vec![
-        Span::styled(
-            " ◆ ",
-            Style::new()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "eckly",
-            Style::new()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  /  ", Style::new().fg(theme::faint())),
-        Span::styled(
-            app.filter.title(),
-            Style::new().fg(theme::text()).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if !app.search.is_empty() {
-        left.push(Span::styled(
-            format!("  “{}”", truncate_width(&app.search, 28)),
-            Style::new().fg(theme::accent_alt()),
-        ));
-    }
-    if app.loading_list {
-        left.push(Span::styled(
-            format!("  {} loading", spinner(app.tick)),
-            Style::new().fg(theme::dim()),
-        ));
-    }
-    if app.offline {
-        left.push(Span::styled(
-            "  offline",
-            Style::new()
-                .fg(theme::accent_alt())
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if app.pending_changes() > 0 {
-        left.push(Span::styled(
-            format!("  {} pending", app.pending_changes()),
-            Style::new()
-                .fg(theme::purple())
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    frame.render_widget(
-        Paragraph::new(Line::from(left))
-            .style(Style::new().bg(theme::bg_bar())),
-        left_area,
-    );
-
-    if right_width > 0 {
-        let user = app
-            .profile
-            .as_ref()
-            .map(|profile| {
-                if profile.user.username.is_empty() {
-                    profile.user.email.as_str()
-                } else {
-                    profile.user.username.as_str()
-                }
-            })
-            .unwrap_or("");
-        let server = display_server(&app.config.server);
-        let text = if user.is_empty() {
-            format!("{server} ")
-        } else {
-            format!("{user}@{server} ")
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                text,
-                Style::new().fg(theme::dim()),
-            )))
-            .alignment(Alignment::Right)
-            .style(Style::new().bg(theme::bg_bar())),
-            right_area,
-        );
-    }
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
@@ -238,21 +134,56 @@ pub(crate) fn status_line(app: &App) -> Line<'static> {
     if let Some(line) = toast_line(app) {
         return line;
     }
-    if let Some(error) = &app.list_error {
-        return Line::from(Span::styled(
-            format!(" {}", truncate_width(error, 140)),
-            Style::new().fg(theme::red()),
+    let mut segments: Vec<(String, Style)> = Vec::new();
+    if app.offline && app.list_error.is_none() {
+        segments.push((
+            "offline".to_string(),
+            Style::new()
+                .fg(theme::accent_alt())
+                .add_modifier(Modifier::BOLD),
         ));
     }
-    if let Some(bookmark) = app.selected_bookmark() {
+    let pending = app.pending_changes();
+    if pending > 0 {
+        segments.push((
+            format!("{pending} pending"),
+            Style::new()
+                .fg(theme::purple())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !app.search.is_empty() {
+        segments.push((
+            format!("“{}”", truncate_width(&app.search, 28)),
+            Style::new().fg(theme::accent_alt()),
+        ));
+    }
+    if let Some(error) = &app.list_error {
+        segments
+            .push((truncate_width(error, 140), Style::new().fg(theme::red())));
+    } else if let Some(bookmark) = app.selected_bookmark() {
         if !bookmark.url.is_empty() {
-            return Line::from(Span::styled(
-                format!(" {}", truncate_width(&bookmark.url, 140)),
+            segments.push((
+                truncate_width(&bookmark.url, 140),
                 Style::new().fg(theme::faint()),
             ));
         }
     }
-    Line::from(Span::styled(" Ready", Style::new().fg(theme::faint())))
+
+    if segments.is_empty() {
+        return Line::from(Span::styled(
+            " Ready",
+            Style::new().fg(theme::faint()),
+        ));
+    }
+    let mut spans = vec![Span::raw(" ")];
+    for (index, (text, style)) in segments.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", Style::new().fg(theme::faint())));
+        }
+        spans.push(Span::styled(text, style));
+    }
+    Line::from(spans)
 }
 
 pub(crate) fn spinner(tick: u64) -> &'static str {

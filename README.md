@@ -154,14 +154,14 @@ article HTML under:
 - `$XDG_CACHE_HOME/eckly`, or
 - `~/.cache/eckly` when `XDG_CACHE_HOME` is not set.
 
-When Readeck cannot be reached, the header shows **offline** and eckly falls
+When Readeck cannot be reached, the status line shows **offline** and eckly falls
 back to the cached bookmark list. Filters, metadata search and sorting work
 locally; collection views require a connection. Opening a cached bookmark loads
 its saved article text.
 
 Changes made offline — read state, favorites, archive state, labels, title, note
-and deletion — are applied locally and stored in a pending queue. The header
-shows the number of pending changes. The queue is sent automatically when
+and deletion — are applied locally and stored in a pending queue. The status
+line shows the number of pending changes. The queue is sent automatically when
 Readeck becomes reachable again, including on the next online launch. Creating
 new bookmarks still requires a connection.
 

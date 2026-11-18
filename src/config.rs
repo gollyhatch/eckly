@@ -142,15 +142,6 @@ pub fn normalize_server(input: &str) -> Result<String> {
     Ok(normalized)
 }
 
-/// Shorten a server URL for display in the title bar.
-pub fn display_server(server: &str) -> String {
-    server
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

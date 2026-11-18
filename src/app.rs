@@ -4121,7 +4121,7 @@ mod tests {
 
         // Left border, the " / " prompt, then the four typed characters.
         let position = terminal.backend_mut().get_cursor_position().unwrap();
-        assert_eq!((position.x, position.y), (8, 2));
+        assert_eq!((position.x, position.y), (8, 1));
     }
 
     #[test]
