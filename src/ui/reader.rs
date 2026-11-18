@@ -405,7 +405,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if speed_reading {
         "  Space pause/resume · h/l word · +/- words per minute · s or Esc back to article"
     } else {
-        "  j/k scroll · Space paragraph · Ctrl+d/u half · g/G top/bottom · H annotations · s speed read · m read · f favorite · a archive · t labels · i images · o browser · Esc back"
+        "  j/k scroll · Space paragraph · Ctrl+d/u half · g/G top/bottom · v highlight · H annotations · s speed read · m read · f favorite · a archive · t labels · i images · o browser · Esc back"
     };
     let top = if let Some(toast) = super::toast_line(app) {
         toast

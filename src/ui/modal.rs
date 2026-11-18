@@ -105,6 +105,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         binding("i", "Toggle images"),
         binding("A", "Toggle text alignment"),
         binding("s", "Speed reading (Space, +/- pace)"),
+        binding("v", "Highlight text"),
         binding("H", "Annotations (n, e, c, d)"),
         binding("o", "Open in browser"),
         binding("r", "Retry article"),

@@ -1749,6 +1749,7 @@ impl App {
             KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                 self.close_reader();
             }
+            KeyCode::Char('v') => self.start_highlight_selection(),
             KeyCode::Down | KeyCode::Char('j') => self.reader_scroll(1),
             KeyCode::Up | KeyCode::Char('k') => self.reader_scroll(-1),
             KeyCode::Char(' ') => {
@@ -2098,6 +2099,19 @@ impl App {
                 result,
             }));
         });
+    }
+
+    fn start_highlight_selection(&mut self) {
+        let started = {
+            let Some(reader) = &mut self.reader else {
+                return;
+            };
+            reader.start_selection();
+            reader.selection.is_some()
+        };
+        if !started {
+            self.toast_info("Nothing to highlight here");
+        }
     }
 
     fn open_annotations(&mut self) {

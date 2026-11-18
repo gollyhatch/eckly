@@ -320,6 +320,7 @@ progress or archive status.
 | `i` | Enable / disable inline images |
 | `A` | Toggle centered / left-aligned text |
 | `s` | Speed reading (RSVP) |
+| `v` | Start a highlight selection |
 | `H` | Annotations (view, add, edit, delete) |
 | `o` | Open in browser |
 | `r` | Retry loading the article |
@@ -333,11 +334,11 @@ word and pause, `+` / `-` change the pace by 25 words per minute, and `s` or
 ### Annotations
 
 Highlights from Readeck are shown in the reader: the annotated text is drawn in
-its color, and a highlight with a note shows it inline as `[note]`. `H` opens
-the annotation list, where `n` starts a text selection, `e` edits the note, `c`
-cycles the color (`yellow`, `red`, `green`, `blue`, `purple`), `d` deletes it
-and `Enter` jumps to it. Annotations made in Readeck's web UI are shown on the
-paragraph that contains them.
+its color, and a highlight with a note shows it inline as `[note]`. `v` starts
+a text selection directly; `H` opens the annotation list, where `n` starts one
+too, `e` edits the note, `c` cycles the color (`yellow`, `red`, `green`, `blue`,
+`purple`), `d` deletes it and `Enter` jumps to it. Annotations made in Readeck's
+web UI are shown on the paragraph that contains them.
 
 In selection mode, move the cursor with `h`/`j`/`k`/`l`, `Enter` or `Space` to
 set the start of the selection and again to finish it. The selected text is
