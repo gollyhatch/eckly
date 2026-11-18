@@ -102,6 +102,19 @@ impl SetupState {
     }
 }
 
+/// A word marked in the article for a moment, after speed reading stops.
+#[derive(Debug, Clone, Copy)]
+pub struct FlashWord {
+    pub line: usize,
+    /// Character offsets in the line text, including its block indent.
+    pub start: usize,
+    pub end: usize,
+    pub until: Instant,
+}
+
+/// How long the last speed reading word stays marked while it fades out.
+pub const FLASH_DURATION: Duration = Duration::from_secs(5);
+
 #[derive(Debug)]
 pub struct OAuthState {
     pub server: String,
@@ -137,6 +150,8 @@ pub struct Reader {
     pub search_query: Option<String>,
     /// Active speed reading session.
     pub speed: Option<SpeedReader>,
+    /// Word marked after leaving speed reading, so the reader can find it.
+    pub flash: Option<FlashWord>,
     /// Highlights on the article.
     pub annotations: Vec<Annotation>,
     /// Text selection in progress.
@@ -185,6 +200,7 @@ impl Reader {
             center_text,
             search_query: None,
             speed: None,
+            flash: None,
             annotations: Vec::new(),
             selection: None,
         }
@@ -195,6 +211,7 @@ impl Reader {
         self.loading = false;
         self.error = None;
         self.speed = None;
+        self.flash = None;
         self.selection = None;
         self.images.clear();
         self.image_errors.clear();
@@ -233,6 +250,7 @@ impl Reader {
 
     fn invalidate_layout(&mut self) {
         self.selection = None;
+        self.flash = None;
         let ratio = self.position_ratio();
         let width = self.effective_width(self.width.max(60));
         self.width = width;
@@ -362,10 +380,25 @@ impl Reader {
 
     /// Leave speed reading and move the article view to the word being read.
     pub fn stop_speed_reading(&mut self) {
-        if let Some(speed) = self.speed.take() {
-            let max = self.max_scroll();
-            let position = (speed.ratio() * max as f32).round() as usize;
-            self.jump_to(position);
+        let Some(speed) = self.speed.take() else {
+            return;
+        };
+        match speed.current_position() {
+            Some((line, start, end)) => {
+                let target = line.saturating_sub(self.viewport.max(1) / 2);
+                self.jump_to(target);
+                self.flash = Some(FlashWord {
+                    line,
+                    start,
+                    end,
+                    until: Instant::now() + FLASH_DURATION,
+                });
+            }
+            None => {
+                let max = self.max_scroll();
+                let position = (speed.ratio() * max as f32).round() as usize;
+                self.jump_to(position);
+            }
         }
     }
 
@@ -3089,6 +3122,7 @@ impl App {
         if reader.speed.is_some() {
             reader.stop_speed_reading();
         } else if !reader.lines.is_empty() {
+            reader.flash = None;
             let speed = SpeedReader::new(&reader.lines, reader.scroll, wpm);
             reader.speed = speed;
         }
@@ -6095,6 +6129,126 @@ mod tests {
         assert!(reader.error.is_none());
         assert!(!reader.lines.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaving_speed_reading_flashes_the_last_word() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::with_cache(
+            Config::default(),
+            PathBuf::from("/tmp/eckly-test"),
+            tx,
+            None,
+            true,
+        );
+        app.screen = Screen::Main;
+
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                title: Some("Article".into()),
+                has_article: true,
+                ..Default::default()
+            },
+            false,
+            0,
+            false,
+        );
+        reader.set_article(parse_article("<p>alpha beta gamma delta</p>"));
+        reader.speed = SpeedReader::new(&reader.lines, 0, 300);
+        reader
+            .speed
+            .as_mut()
+            .unwrap()
+            .advance(Instant::now() + Duration::from_millis(450));
+        assert_eq!(reader.speed.as_ref().unwrap().current(), "gamma");
+
+        reader.stop_speed_reading();
+        let flash = reader.flash.unwrap();
+        assert_eq!((flash.line, flash.start, flash.end), (0, 11, 16));
+        assert!(Instant::now() < flash.until);
+        assert!(reader.speed.is_none());
+        app.reader = Some(reader);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let locate = |buffer: &ratatui::buffer::Buffer| {
+            (0..buffer.area.height).find_map(|y| {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                row.find("gamma")
+                    .map(|byte| (row[..byte].chars().count() as u16, y))
+            })
+        };
+
+        let buffer = terminal.backend().buffer();
+        let (x, y) = locate(buffer).expect("the flashed word is drawn");
+        for offset in 0..5 {
+            let cell = &buffer[(x + offset, y)];
+            assert_eq!(cell.bg, crate::ui::theme::accent());
+            assert_eq!(cell.fg, crate::ui::theme::bg_base());
+        }
+        assert_ne!(buffer[(x + 6, y)].bg, crate::ui::theme::accent());
+
+        // Halfway through, the word sits between the accent and the article
+        // colors.
+        app.reader.as_mut().unwrap().flash.as_mut().unwrap().until =
+            Instant::now() + crate::app::FLASH_DURATION / 2;
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = locate(buffer).unwrap();
+        let middle = buffer[(x, y)].bg;
+        assert_ne!(middle, crate::ui::theme::accent());
+        assert_ne!(middle, crate::ui::theme::bg_base());
+
+        app.reader.as_mut().unwrap().flash.as_mut().unwrap().until =
+            Instant::now() - Duration::from_secs(1);
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = locate(buffer).unwrap();
+        for offset in 0..5 {
+            assert_ne!(buffer[(x + offset, y)].bg, crate::ui::theme::accent());
+        }
+    }
+
+    #[test]
+    fn leaving_speed_reading_scrolls_to_the_word() {
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                title: Some("Article".into()),
+                has_article: true,
+                ..Default::default()
+            },
+            false,
+            0,
+            false,
+        );
+        let mut html = String::new();
+        for index in 1..=40 {
+            html.push_str(&format!("<p>paragraph {index}</p>"));
+        }
+        reader.set_article(parse_article(&html));
+        reader.viewport = 10;
+        reader.jump_to(30);
+        reader.speed = SpeedReader::new(&reader.lines, 20, 300);
+
+        reader.stop_speed_reading();
+
+        let flash = reader.flash.unwrap();
+        assert!(flash.line >= 20);
+        assert!(flash.line >= reader.scroll);
+        assert!(flash.line < reader.scroll + reader.viewport);
     }
 
     #[test]

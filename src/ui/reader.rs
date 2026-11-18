@@ -1,6 +1,8 @@
+use std::time::Instant;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -252,6 +254,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .bg(theme::bg_selected())
                 .fg(theme::text())
                 .add_modifier(Modifier::BOLD);
+            let now = Instant::now();
+            let flash_style = reader
+                .flash
+                .filter(|flash| now < flash.until)
+                .map(|flash| flash_style(now, flash.until));
             let visible: Vec<Line> = reader
                 .lines
                 .iter()
@@ -285,6 +292,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         selection_span(bounds, index, line)
                     {
                         styles.push((from, to, selection_style));
+                    }
+                    if let (Some(flash), Some(style)) =
+                        (reader.flash, flash_style)
+                    {
+                        if index == flash.line {
+                            let indent = indent_chars(&line.text, line.indent);
+                            let from = flash.start.saturating_sub(indent);
+                            let to = flash.end.saturating_sub(indent);
+                            if from < to {
+                                styles.push((from, to, style));
+                            }
+                        }
                     }
                     let mut notes = Vec::new();
                     if let (Some(range), Some(block)) =
@@ -451,6 +470,40 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .style(Style::new().bg(theme::bg_bar())),
         right_area,
     );
+}
+
+/// Style of the word marked after speed reading. It fades from the accent
+/// color to the article colors over [`crate::app::FLASH_DURATION`].
+fn flash_style(now: Instant, until: Instant) -> Style {
+    let total = crate::app::FLASH_DURATION.as_secs_f32().max(0.001);
+    let remaining = (until - now).as_secs_f32().clamp(0.0, total);
+    let progress = 1.0 - remaining / total;
+    let background = smoothstep(progress);
+    let foreground = smoothstep((progress / 0.35).min(1.0));
+    Style::new()
+        .bg(blend(theme::accent(), theme::bg_base(), background))
+        .fg(blend(theme::bg_base(), theme::text(), foreground))
+}
+
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn blend(from: Color, to: Color, t: f32) -> Color {
+    let (r1, g1, b1) = rgb(from);
+    let (r2, g2, b2) = rgb(to);
+    let mix = |a: u8, b: u8| {
+        (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8
+    };
+    Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
+}
+
+fn rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    }
 }
 
 fn block_style(kind: Option<BlockKind>) -> Style {

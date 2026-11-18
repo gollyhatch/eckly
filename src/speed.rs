@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 use crate::article::{BlockKind, WrappedLine};
 
+use unicode_width::UnicodeWidthChar;
+
 pub const DEFAULT_WPM: u16 = 300;
 pub const MIN_WPM: u16 = 100;
 pub const MAX_WPM: u16 = 1000;
@@ -13,8 +15,18 @@ pub const WPM_STEP: i16 = 25;
 /// The article is tokenized into words and shown one at a time at a fixed
 /// pace, starting at the line the reader is on.
 #[derive(Debug, Clone)]
+struct SpeedWord {
+    text: String,
+    /// Line index in the reader's wrapped lines.
+    line: usize,
+    /// Character offsets in the line text, past the block indent.
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct SpeedReader {
-    words: Vec<String>,
+    words: Vec<SpeedWord>,
     index: usize,
     wpm: u16,
     playing: bool,
@@ -43,14 +55,14 @@ impl SpeedReader {
             if line.kind == Some(BlockKind::Image) {
                 continue;
             }
-            let mut line_words = line.text.split_whitespace();
-            if start.is_none() && line_index >= from_line {
-                if let Some(first) = line_words.next() {
-                    start = Some(words.len());
-                    words.push(first.to_string());
-                }
+            let line_words = words_in_line(line_index, line);
+            if start.is_none()
+                && line_index >= from_line
+                && !line_words.is_empty()
+            {
+                start = Some(words.len());
             }
-            words.extend(line_words.map(str::to_string));
+            words.extend(line_words);
         }
         if words.is_empty() {
             return None;
@@ -138,8 +150,16 @@ impl SpeedReader {
     pub fn current(&self) -> &str {
         self.words
             .get(self.index)
-            .map(String::as_str)
+            .map(|word| word.text.as_str())
             .unwrap_or_default()
+    }
+
+    /// Where the current word sits in the article: line index and character
+    /// offsets in the line text.
+    pub fn current_position(&self) -> Option<(usize, usize, usize)> {
+        self.words
+            .get(self.index)
+            .map(|word| (word.line, word.start, word.end))
     }
 
     /// Reading position as a fraction, used to move the article view when
@@ -151,6 +171,36 @@ impl SpeedReader {
             self.index as f32 / (self.words.len() - 1) as f32
         }
     }
+}
+
+fn words_in_line(line: usize, wrapped: &WrappedLine) -> Vec<SpeedWord> {
+    let chars: Vec<char> = wrapped.text.chars().collect();
+    let mut skip = 0;
+    let mut width = 0;
+    while skip < chars.len() && width < wrapped.indent {
+        width += chars[skip].width().unwrap_or(0);
+        skip += 1;
+    }
+    let mut words = Vec::new();
+    let mut index = skip;
+    while index < chars.len() {
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        let start = index;
+        while index < chars.len() && !chars[index].is_whitespace() {
+            index += 1;
+        }
+        if start < index {
+            words.push(SpeedWord {
+                text: chars[start..index].iter().collect(),
+                line,
+                start,
+                end: index,
+            });
+        }
+    }
+    words
 }
 
 fn clamp_wpm(wpm: u16) -> u16 {
@@ -259,6 +309,28 @@ mod tests {
         let speed = SpeedReader::new(&rendered, 1, 300).unwrap();
         assert_eq!(speed.total(), 2);
         assert_eq!(speed.current(), "two");
+    }
+
+    #[test]
+    fn reports_word_positions() {
+        let lines = lines(&["one two", "three four"]);
+        let start = Instant::now();
+        let mut speed = SpeedReader::new_at(&lines, 0, 300, start).unwrap();
+        assert_eq!(speed.current_position(), Some((0, 0, 3)));
+        speed.advance(start + Duration::from_millis(201));
+        assert_eq!(speed.current_position(), Some((0, 4, 7)));
+        speed.advance(start + Duration::from_millis(401));
+        assert_eq!(speed.current_position(), Some((1, 0, 5)));
+    }
+
+    #[test]
+    fn skips_the_block_indent() {
+        let mut quote = lines(&["│ hello world"]);
+        quote[0].indent = 2;
+        let speed = SpeedReader::new(&quote, 0, 300).unwrap();
+        assert_eq!(speed.total(), 2);
+        assert_eq!(speed.current(), "hello");
+        assert_eq!(speed.current_position(), Some((0, 2, 7)));
     }
 
     #[test]
