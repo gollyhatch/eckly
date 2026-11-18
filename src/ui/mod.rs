@@ -108,14 +108,33 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             "  j/k move · Space select · Enter read · m read · f favorite · a archive · t labels · / search · n add · Tab filters · ? help"
         }
     };
+    let offline_width = if app.offline { 9 } else { 0 };
+    let [hints_left, hints_right] = Layout::horizontal([
+        Constraint::Min(16),
+        Constraint::Length(offline_width),
+    ])
+    .areas(hints_area);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            truncate_width(hints, area.width as usize),
+            truncate_width(hints, hints_left.width as usize),
             Style::new().fg(theme::faint()),
         )))
         .style(Style::new().bg(theme::bg_bar())),
-        hints_area,
+        hints_left,
     );
+    if app.offline {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " OFFLINE ",
+                Style::new()
+                    .fg(theme::accent_alt())
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Right)
+            .style(Style::new().bg(theme::bg_bar())),
+            hints_right,
+        );
+    }
 }
 
 pub(crate) fn toast_line(app: &App) -> Option<Line<'static>> {
@@ -135,14 +154,6 @@ pub(crate) fn status_line(app: &App) -> Line<'static> {
         return line;
     }
     let mut segments: Vec<(String, Style)> = Vec::new();
-    if app.offline && app.list_error.is_none() {
-        segments.push((
-            "offline".to_string(),
-            Style::new()
-                .fg(theme::accent_alt())
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
     let pending = app.pending_changes();
     if pending > 0 {
         segments.push((

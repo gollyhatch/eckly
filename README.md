@@ -154,7 +154,7 @@ article HTML under:
 - `$XDG_CACHE_HOME/eckly`, or
 - `~/.cache/eckly` when `XDG_CACHE_HOME` is not set.
 
-When Readeck cannot be reached, the status line shows **offline** and eckly falls
+When Readeck cannot be reached, the help line shows **OFFLINE** and eckly falls
 back to the cached bookmark list. Filters, metadata search and sorting work
 locally; collection views require a connection. Opening a cached bookmark loads
 its saved article text.
