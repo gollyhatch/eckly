@@ -13,14 +13,19 @@ headings, lists, quotes, code blocks and inline images:
 
 ![eckly reading view using the Ayu Dark theme](screenshots/reader.png)
 
+The Highlights view groups every highlight by bookmark and follows the article
+order; press `Enter` to jump to one:
+
+![eckly highlights view using the Ayu Dark theme](screenshots/highlights.png)
+
 ## Features
 
 - **Browse** the inbox (all non-archived bookmarks, including finished ones),
   reading progress, favorites and archives, or filter by label or collection.
 - **Search** your library with Readeck's full-text search, or search within the
   current article with highlighted matches.
-- **Annotate** paragraphs with colored highlights and notes, and browse or edit
-  them from the reader.
+- **Annotate** paragraphs with colored highlights and notes. The Library pane
+  lists every highlight by bookmark, and the reader browses or edits them.
 - **Read** extracted articles in a comfortable, scrollable reader. Plain text is
   reflowed to the terminal width; headings, lists, quotes, code and images are
   rendered inline. Images use truecolor half blocks and are fetched from
