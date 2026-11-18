@@ -455,6 +455,210 @@ impl Reader {
         self.ensure_selection_visible();
     }
 
+    fn line_chars(&self, line: usize) -> Vec<char> {
+        self.lines
+            .get(line)
+            .map(|wrapped| wrapped.text.chars().skip(wrapped.indent).collect())
+            .unwrap_or_default()
+    }
+
+    fn pos_class(&self, pos: TextPos, big: bool) -> u8 {
+        match self.line_chars(pos.line).get(pos.offset) {
+            None => 0,
+            Some(ch) if ch.is_whitespace() => 0,
+            Some(_) if big => 1,
+            Some(ch) if ch.is_alphanumeric() || *ch == '_' => 1,
+            Some(_) => 2,
+        }
+    }
+
+    fn next_text_pos(&self, pos: TextPos) -> Option<TextPos> {
+        if pos.offset < self.line_len(pos.line) {
+            return Some(TextPos {
+                line: pos.line,
+                offset: pos.offset + 1,
+            });
+        }
+        (pos.line + 1..self.lines.len())
+            .find(|&line| self.selectable_line(line))
+            .map(|line| TextPos { line, offset: 0 })
+    }
+
+    fn prev_text_pos(&self, pos: TextPos) -> Option<TextPos> {
+        if pos.offset > 0 {
+            return Some(TextPos {
+                line: pos.line,
+                offset: pos.offset - 1,
+            });
+        }
+        (0..pos.line)
+            .rev()
+            .find(|&line| self.selectable_line(line))
+            .map(|line| TextPos {
+                line,
+                offset: self.line_len(line),
+            })
+    }
+
+    /// Move by words (`w`/`b`) or WORDS (`W`/`B`).
+    pub fn selection_word(&mut self, forward: bool, big: bool) {
+        let Some(mut selection) = self.selection else {
+            return;
+        };
+        let mut pos = selection.cursor;
+        if forward {
+            if self.pos_class(pos, big) != 0 {
+                let class = self.pos_class(pos, big);
+                while let Some(next) = self.next_text_pos(pos) {
+                    pos = next;
+                    if self.pos_class(pos, big) != class {
+                        break;
+                    }
+                }
+            }
+            while self.pos_class(pos, big) == 0 {
+                match self.next_text_pos(pos) {
+                    Some(next) => pos = next,
+                    None => break,
+                }
+            }
+        } else {
+            let Some(back) = self.prev_text_pos(pos) else {
+                return;
+            };
+            pos = back;
+            while self.pos_class(pos, big) == 0 {
+                match self.prev_text_pos(pos) {
+                    Some(prev) => pos = prev,
+                    None => break,
+                }
+            }
+            let class = self.pos_class(pos, big);
+            while let Some(prev) = self.prev_text_pos(pos) {
+                if self.pos_class(prev, big) != class {
+                    break;
+                }
+                pos = prev;
+            }
+        }
+        selection.cursor = pos;
+        self.selection = Some(selection);
+        self.ensure_selection_visible();
+    }
+
+    /// Move to the end of the current or next word (`e`/`E`).
+    pub fn selection_word_end(&mut self, big: bool) {
+        let Some(mut selection) = self.selection else {
+            return;
+        };
+        let mut pos = selection.cursor;
+        let class = self.pos_class(pos, big);
+        if class != 0 {
+            let at_end = match self.next_text_pos(pos) {
+                Some(next) => self.pos_class(next, big) != class,
+                None => true,
+            };
+            if at_end {
+                if let Some(next) = self.next_text_pos(pos) {
+                    pos = next;
+                }
+                while self.pos_class(pos, big) == 0 {
+                    match self.next_text_pos(pos) {
+                        Some(next) => pos = next,
+                        None => break,
+                    }
+                }
+            }
+        } else {
+            while self.pos_class(pos, big) == 0 {
+                match self.next_text_pos(pos) {
+                    Some(next) => pos = next,
+                    None => break,
+                }
+            }
+        }
+        let class = self.pos_class(pos, big);
+        if class != 0 {
+            while let Some(next) = self.next_text_pos(pos) {
+                if self.pos_class(next, big) != class {
+                    break;
+                }
+                pos = next;
+            }
+        }
+        selection.cursor = pos;
+        self.selection = Some(selection);
+        self.ensure_selection_visible();
+    }
+
+    /// Jump to the start (`0`) or end (`$`) of the line.
+    pub fn selection_line_edge(&mut self, end: bool) {
+        let Some(mut selection) = self.selection else {
+            return;
+        };
+        let length = self.line_len(selection.cursor.line);
+        selection.cursor.offset = if end { length } else { 0 };
+        self.selection = Some(selection);
+        self.ensure_selection_visible();
+    }
+
+    /// Jump to the first non-blank character (`^`).
+    pub fn selection_first_non_blank(&mut self) {
+        let Some(mut selection) = self.selection else {
+            return;
+        };
+        let offset = self
+            .line_chars(selection.cursor.line)
+            .iter()
+            .position(|ch| !ch.is_whitespace())
+            .unwrap_or(0);
+        selection.cursor.offset = offset;
+        self.selection = Some(selection);
+        self.ensure_selection_visible();
+    }
+
+    /// Jump to the previous (`{`) or next (`}`) paragraph.
+    pub fn selection_block(&mut self, delta: isize) {
+        let Some(mut selection) = self.selection else {
+            return;
+        };
+        let current = self.lines[selection.cursor.line].block;
+        let target = if delta > 0 {
+            (selection.cursor.line + 1..self.lines.len()).find(|&line| {
+                self.selectable_line(line) && self.lines[line].block != current
+            })
+        } else {
+            (0..selection.cursor.line).rev().find(|&line| {
+                self.selectable_line(line) && self.lines[line].block != current
+            })
+        };
+        match target {
+            Some(line) => {
+                selection.cursor = TextPos { line, offset: 0 };
+            }
+            None if delta > 0 => {
+                if let Some(line) = (0..self.lines.len())
+                    .rev()
+                    .find(|&line| self.selectable_line(line))
+                {
+                    selection.cursor = TextPos {
+                        line,
+                        offset: self.line_len(line),
+                    };
+                }
+            }
+            None => {
+                if let Some(line) = (0..self.lines.len())
+                    .find(|&line| self.selectable_line(line))
+                {
+                    selection.cursor = TextPos { line, offset: 0 };
+                }
+            }
+        }
+        self.selection = Some(selection);
+        self.ensure_selection_visible();
+    }
+
     pub fn selection_move(&mut self, delta: isize) {
         let Some(mut selection) = self.selection else {
             return;
@@ -2375,6 +2579,61 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 if let Some(reader) = &mut self.reader {
                     reader.selection_move(-1);
+                }
+            }
+            KeyCode::Char('w') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_word(true, false);
+                }
+            }
+            KeyCode::Char('W') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_word(true, true);
+                }
+            }
+            KeyCode::Char('b') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_word(false, false);
+                }
+            }
+            KeyCode::Char('e') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_word_end(false);
+                }
+            }
+            KeyCode::Char('E') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_word_end(true);
+                }
+            }
+            KeyCode::Char('B') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_word(false, true);
+                }
+            }
+            KeyCode::Char('0') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_line_edge(false);
+                }
+            }
+            KeyCode::Char('$') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_line_edge(true);
+                }
+            }
+            KeyCode::Char('^') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_first_non_blank();
+                }
+            }
+            KeyCode::Char('{') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_block(-1);
+                }
+            }
+            KeyCode::Char('}') => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_block(1);
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.selection_press(),
@@ -4929,6 +5188,83 @@ mod tests {
         reader.selection_left();
         assert_eq!(reader.selection.unwrap().cursor.line, 0);
         assert_eq!(reader.selection.unwrap().cursor.offset, 10);
+    }
+
+    #[test]
+    fn selection_supports_vim_motions() {
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.set_article(parse_article(
+            "<p>one two three</p><p>foo.bar baz</p>",
+        ));
+        reader.viewport = 5;
+        reader.start_selection();
+        let pos = |line, offset| TextPos { line, offset };
+
+        reader.selection_word(true, false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 4));
+        reader.selection_word(true, false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 8));
+        reader.selection_word(false, false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 4));
+
+        // End of word with `e`, and end of WORD with `E`.
+        reader.selection.as_mut().unwrap().cursor = pos(0, 0);
+        reader.selection_word_end(false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 2));
+        reader.selection_word_end(false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 6));
+        reader.selection_word_end(false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 12));
+        reader.selection.as_mut().unwrap().cursor = pos(2, 0);
+        reader.selection_word_end(false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(2, 2));
+        reader.selection_word_end(false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(2, 3));
+        reader.selection.as_mut().unwrap().cursor = pos(2, 0);
+        reader.selection_word_end(true);
+        assert_eq!(reader.selection.unwrap().cursor, pos(2, 6));
+
+        // Punctuation separates words, not WORDS.
+        reader.selection.as_mut().unwrap().cursor = pos(2, 0);
+        reader.selection_word(true, false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(2, 3));
+        reader.selection.as_mut().unwrap().cursor = pos(2, 0);
+        reader.selection_word(true, true);
+        assert_eq!(reader.selection.unwrap().cursor, pos(2, 8));
+        reader.selection.as_mut().unwrap().cursor = pos(2, 8);
+        reader.selection_word(false, true);
+        assert_eq!(reader.selection.unwrap().cursor, pos(2, 0));
+
+        // Line edges.
+        reader.selection.as_mut().unwrap().cursor = pos(0, 2);
+        reader.selection_line_edge(false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 0));
+        reader.selection_line_edge(true);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 13));
+
+        // Paragraph moves.
+        reader.selection.as_mut().unwrap().cursor = pos(0, 5);
+        reader.selection_block(1);
+        assert_eq!(reader.selection.unwrap().cursor, pos(2, 0));
+        reader.selection_block(-1);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 0));
+
+        // Words continue across wrapped lines.
+        reader.reflow(10);
+        reader.selection = None;
+        reader.start_selection();
+        reader.selection_word(true, false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(0, 4));
+        reader.selection_word(true, false);
+        assert_eq!(reader.selection.unwrap().cursor, pos(1, 0));
     }
 
     #[test]

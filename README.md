@@ -340,11 +340,14 @@ too, `e` edits the note, `c` cycles the color (`yellow`, `red`, `green`, `blue`,
 `purple`), `d` deletes it and `Enter` jumps to it. Annotations made in Readeck's
 web UI are shown on the paragraph that contains them.
 
-In selection mode, move the cursor with `h`/`j`/`k`/`l`, `Enter` or `Space` to
-set the start of the selection and again to finish it. The selected text is
-highlighted as you move, and finishing creates a yellow highlight that you can
-give a note or another color from the list. Inline notes are hidden while
-selecting so they cannot end up in a selection. `Esc` cancels the selection.
+In selection mode, move the cursor with `h`/`j`/`k`/`l`, jump by word with
+`w`/`b`/`e` (or `W`/`B`/`E` for whitespace-delimited words), jump to the start
+or end of the line with `0`/`^`/`$`, and jump between paragraphs with `{`/`}`.
+`Enter` or `Space` sets the start of the selection and a second press finishes
+it. The selected text is highlighted as you move, and finishing creates a
+yellow highlight that you can give a note or another color from the list.
+Inline notes are hidden while selecting so they cannot end up in a selection.
+`Esc` cancels the selection.
 `eckly sync` downloads annotations too, so highlights stay visible offline;
 adding or editing them needs a connection to Readeck.
 
