@@ -241,6 +241,37 @@ impl Cache {
         self.state.annotations.get(bookmark_id)
     }
 
+    pub fn bookmark_ref(&self, id: &str) -> Option<&Bookmark> {
+        self.state.bookmarks.get(id)
+    }
+
+    /// Every cached annotation, newest first.
+    pub fn all_annotations(&self) -> Vec<Annotation> {
+        let mut annotations = Vec::new();
+        for (bookmark_id, items) in &self.state.annotations {
+            for item in items {
+                let mut item = item.clone();
+                if item.bookmark_id.is_empty() {
+                    item.bookmark_id = bookmark_id.clone();
+                }
+                if let Some(bookmark) = self.state.bookmarks.get(bookmark_id) {
+                    if item.bookmark_title.is_empty() {
+                        item.bookmark_title = bookmark.display_title();
+                    }
+                    if item.bookmark_url.is_empty() {
+                        item.bookmark_url = bookmark.url.clone();
+                    }
+                    if item.bookmark_site_name.is_empty() {
+                        item.bookmark_site_name = bookmark.host();
+                    }
+                }
+                annotations.push(item);
+            }
+        }
+        annotations.sort_by_key(|a| std::cmp::Reverse(a.created));
+        annotations
+    }
+
     pub fn set_annotations(
         &mut self,
         bookmark_id: &str,
@@ -416,7 +447,7 @@ impl Cache {
         search: &SearchQuery,
         sort: Sort,
     ) -> Vec<Bookmark> {
-        if matches!(filter, Filter::Collection { .. }) {
+        if matches!(filter, Filter::Collection { .. } | Filter::Highlights) {
             return Vec::new();
         }
 

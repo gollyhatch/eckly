@@ -105,7 +105,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             "  j/k move · / filter · Enter apply · R rename label · PgUp/PgDn page · Ctrl+d/u · Tab/Esc back · ? help"
         }
         crate::app::Focus::List => {
-            "  j/k move · Space select · Enter read · m read · f favorite · a archive · t labels · / search · n add · Tab filters · ? help"
+            if app.filter == crate::models::Filter::Highlights {
+                "  j/k move · Enter open highlight · PgUp/PgDn page · r refresh · Tab filters · ? help"
+            } else {
+                "  j/k move · Space select · Enter read · m read · f favorite · a archive · t labels · / search · n add · Tab filters · ? help"
+            }
         }
     };
     let offline_width = if app.offline { 9 } else { 0 };

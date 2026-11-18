@@ -304,6 +304,12 @@ pub struct Annotation {
     #[serde(default)]
     pub bookmark_id: String,
     #[serde(default, deserialize_with = "deserialize_entity_string")]
+    pub bookmark_title: String,
+    #[serde(default)]
+    pub bookmark_url: String,
+    #[serde(default, deserialize_with = "deserialize_entity_string")]
+    pub bookmark_site_name: String,
+    #[serde(default, deserialize_with = "deserialize_entity_string")]
     pub text: String,
     #[serde(default, deserialize_with = "deserialize_entity_string")]
     pub note: String,
@@ -365,6 +371,7 @@ pub enum Filter {
     Reading,
     Marked,
     Archived,
+    Highlights,
     Label(String),
     Collection { id: String, name: String },
 }
@@ -387,6 +394,7 @@ impl Filter {
             }
             Self::Marked => bookmark.is_marked && !bookmark.is_archived,
             Self::Archived => bookmark.is_archived,
+            Self::Highlights => false,
             Self::Label(name) => {
                 bookmark.labels.iter().any(|label| label == name)
             }
@@ -401,6 +409,7 @@ impl Filter {
             Self::Reading => "Reading".into(),
             Self::Marked => "Favorites".into(),
             Self::Archived => "Archived".into(),
+            Self::Highlights => "Highlights".into(),
             Self::Label(name) => format!("#{name}"),
             Self::Collection { name, .. } => name.clone(),
         }
@@ -894,6 +903,7 @@ impl BookmarkQuery {
                 query.is_archived = Some(false);
             }
             Filter::Archived => query.is_archived = Some(true),
+            Filter::Highlights => {}
             Filter::Label(name) => {
                 // A label is a complete view of all bookmarks carrying it,
                 // including read and archived bookmarks.

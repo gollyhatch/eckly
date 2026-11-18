@@ -1038,6 +1038,10 @@ pub struct App {
     cache: Option<Cache>,
     /// Library annotations by bookmark, for the bookmark list.
     annotation_summaries: Option<HashMap<String, Vec<Annotation>>>,
+    /// All highlights shown in the Highlights view.
+    pub highlights: Vec<Annotation>,
+    /// Annotation to scroll to once a bookmark's reader is ready.
+    pending_highlight: Option<String>,
     tx: UnboundedSender<Event>,
     list_seq: u64,
     pending_select: Option<String>,
@@ -1101,6 +1105,8 @@ impl App {
             offline_mode,
             cache,
             annotation_summaries: None,
+            highlights: Vec::new(),
+            pending_highlight: None,
             tx,
             list_seq: 0,
             pending_select: None,
@@ -1111,6 +1117,42 @@ impl App {
         app
     }
 
+    fn rebuild_highlights(&mut self) {
+        let mut highlights = match &self.annotation_summaries {
+            Some(summaries) => summaries.values().flatten().cloned().collect(),
+            None => self
+                .cache
+                .as_ref()
+                .map(Cache::all_annotations)
+                .unwrap_or_default(),
+        };
+        for annotation in &mut highlights {
+            if annotation.bookmark_title.is_empty() {
+                if let Some(bookmark) = self.cache.as_ref().and_then(|cache| {
+                    cache.bookmark_ref(&annotation.bookmark_id)
+                }) {
+                    annotation.bookmark_title = bookmark.display_title();
+                    if annotation.bookmark_url.is_empty() {
+                        annotation.bookmark_url = bookmark.url.clone();
+                    }
+                    if annotation.bookmark_site_name.is_empty() {
+                        annotation.bookmark_site_name = bookmark.host();
+                    }
+                }
+            }
+        }
+        highlights.sort_by_key(|a| std::cmp::Reverse(a.created));
+        self.highlights = highlights;
+    }
+
+    fn list_len(&self) -> usize {
+        if self.filter == Filter::Highlights {
+            self.highlights.len()
+        } else {
+            self.bookmarks.len()
+        }
+    }
+
     fn preload_cache(&mut self) {
         let Some(cache) = &self.cache else {
             return;
@@ -1118,6 +1160,16 @@ impl App {
         let labels = cache.labels();
         let collections = cache.collections();
         let profile = cache.profile();
+        if self.filter == Filter::Highlights {
+            self.rebuild_highlights();
+            self.bookmarks.clear();
+            self.total = self.highlights.len();
+            self.list_state
+                .select((!self.highlights.is_empty()).then_some(0));
+            self.list_error = None;
+            self.selected_ids.clear();
+            return;
+        }
         let search = SearchQuery::parse(&self.search);
         let bookmarks = cache.local_bookmarks(&self.filter, &search, self.sort);
 
@@ -1125,6 +1177,15 @@ impl App {
         self.collections = collections;
         if let Some(profile) = profile {
             self.profile = Some(profile);
+        }
+        if self.filter == Filter::Highlights {
+            self.bookmarks.clear();
+            self.rebuild_highlights();
+            self.total = self.highlights.len();
+            self.list_state
+                .select((!self.highlights.is_empty()).then_some(0));
+            self.rebuild_sidebar();
+            return;
         }
         self.total = bookmarks.len();
         self.bookmarks = bookmarks;
@@ -1845,6 +1906,38 @@ impl App {
             }
         }
 
+        if self.filter == Filter::Highlights {
+            match key.code {
+                KeyCode::Char('q') => self.quit = true,
+                KeyCode::Esc
+                | KeyCode::Tab
+                | KeyCode::Char('h')
+                | KeyCode::Left => self.focus = Focus::Sidebar,
+                KeyCode::Down | KeyCode::Char('j') => self.list_move(1),
+                KeyCode::Up | KeyCode::Char('k') => self.list_move(-1),
+                KeyCode::PageDown => {
+                    let page = self.list_viewport.max(1);
+                    self.list_move(page as isize);
+                }
+                KeyCode::PageUp => {
+                    let page = self.list_viewport.max(1);
+                    self.list_move(-(page as isize));
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    self.list_select_edge(true)
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    self.list_select_edge(false)
+                }
+                KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                    self.open_selected_highlight()
+                }
+                KeyCode::Char('r') => self.refresh_all(),
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc => {
@@ -2075,31 +2168,37 @@ impl App {
     }
 
     fn list_move(&mut self, delta: isize) {
-        if self.bookmarks.is_empty() {
+        let len = self.list_len();
+        if len == 0 {
             return;
         }
         let current = self.list_state.selected().unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, self.bookmarks.len() as isize - 1)
-            as usize;
+        let next = (current + delta).clamp(0, len as isize - 1) as usize;
         self.list_state.select(Some(next));
         self.maybe_load_more();
     }
 
     fn list_select_edge(&mut self, start: bool) {
-        if self.bookmarks.is_empty() {
+        let len = self.list_len();
+        if len == 0 {
             return;
         }
         if start {
             self.list_state.select(Some(0));
             return;
         }
-        self.list_state.select(Some(self.bookmarks.len() - 1));
-        if self.bookmarks.len() < self.total {
+        self.list_state.select(Some(len - 1));
+        if self.filter != Filter::Highlights
+            && self.bookmarks.len() < self.total
+        {
             self.request_bookmarks(true, false);
         }
     }
 
     fn maybe_load_more(&mut self) {
+        if self.filter == Filter::Highlights {
+            return;
+        }
         let Some(index) = self.list_state.selected() else {
             return;
         };
@@ -2113,6 +2212,17 @@ impl App {
     }
 
     fn request_bookmarks(&mut self, append: bool, preserve_selection: bool) {
+        if self.filter == Filter::Highlights {
+            self.loading_list = false;
+            self.loading_more = false;
+            self.list_error = None;
+            self.rebuild_highlights();
+            self.bookmarks.clear();
+            self.total = self.highlights.len();
+            self.list_state
+                .select((!self.highlights.is_empty()).then_some(0));
+            return;
+        }
         if self.offline_mode {
             if !append {
                 self.list_seq = self.list_seq.wrapping_add(1);
@@ -2264,6 +2374,80 @@ impl App {
         let Some(bookmark) = self.selected_bookmark() else {
             return;
         };
+        self.open_bookmark(bookmark, None);
+    }
+
+    fn open_selected_highlight(&mut self) {
+        let Some(annotation) = self
+            .list_state
+            .selected()
+            .and_then(|index| self.highlights.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let bookmark = self.bookmark_for_annotation(&annotation);
+        self.open_bookmark(bookmark, Some(annotation.id));
+    }
+
+    fn bookmark_for_annotation(&self, annotation: &Annotation) -> Bookmark {
+        if let Some(bookmark) = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.bookmark_ref(&annotation.bookmark_id))
+        {
+            return bookmark.clone();
+        }
+        if let Some(bookmark) = self
+            .bookmarks
+            .iter()
+            .find(|bookmark| bookmark.id == annotation.bookmark_id)
+        {
+            return bookmark.clone();
+        }
+        Bookmark {
+            id: annotation.bookmark_id.clone(),
+            title: (!annotation.bookmark_title.is_empty())
+                .then(|| annotation.bookmark_title.clone()),
+            url: annotation.bookmark_url.clone(),
+            site_name: (!annotation.bookmark_site_name.is_empty())
+                .then(|| annotation.bookmark_site_name.clone()),
+            has_article: true,
+            ..Default::default()
+        }
+    }
+
+    fn apply_pending_highlight(&mut self) {
+        let Some(id) = self.pending_highlight.clone() else {
+            return;
+        };
+        let block = {
+            let Some(reader) = &mut self.reader else {
+                return;
+            };
+            if reader.lines.is_empty() {
+                return;
+            }
+            reader
+                .annotations
+                .iter()
+                .find(|annotation| annotation.id == id)
+                .and_then(|annotation| reader.annotation_block(annotation))
+        };
+        let Some(block) = block else {
+            return;
+        };
+        if self
+            .reader
+            .as_mut()
+            .is_some_and(|reader| reader.jump_to_block(block))
+        {
+            self.pending_highlight = None;
+        }
+    }
+
+    fn open_bookmark(&mut self, bookmark: Bookmark, highlight: Option<String>) {
+        self.pending_highlight = highlight;
         let mut reader = Reader::new(
             bookmark.clone(),
             self.images_enabled,
@@ -2300,6 +2484,7 @@ impl App {
                 );
             }
             self.reader = Some(reader);
+            self.apply_pending_highlight();
             return;
         }
         if bookmark.has_article {
@@ -2310,6 +2495,7 @@ impl App {
             self.reader = Some(reader);
         }
         self.request_annotations(&bookmark.id);
+        self.apply_pending_highlight();
     }
 
     fn request_article(&mut self, id: &str) {
@@ -2598,6 +2784,16 @@ impl App {
             return;
         };
         reader.stop_speed_reading();
+        self.pending_highlight = None;
+        if self.filter == Filter::Highlights {
+            self.rebuild_highlights();
+            self.total = self.highlights.len();
+            let selected = self.list_state.selected().unwrap_or(0);
+            self.list_state.select(
+                (!self.highlights.is_empty())
+                    .then_some(selected.min(self.highlights.len() - 1)),
+            );
+        }
         let progress = reader.progress();
         if reader.scrolled
             && !reader.manual_read_state
@@ -3651,6 +3847,7 @@ impl App {
             (Filter::Marked, "★  Favorites"),
             (Filter::Archived, "■  Archived"),
             (Filter::All, "≡  All Bookmarks"),
+            (Filter::Highlights, "✎  Highlights"),
         ] {
             if matches(text) {
                 items.push(SidebarItem {
@@ -3909,6 +4106,7 @@ impl App {
                         if self.images_enabled {
                             self.request_images_for_reader(id, urls);
                         }
+                        self.apply_pending_highlight();
                     }
                     Err(err) => {
                         if self.handle_unauthorized(&err) {
@@ -3980,6 +4178,7 @@ impl App {
                         }
                         self.store_reader_annotations();
                         self.store_annotation_summaries();
+                        self.apply_pending_highlight();
                     }
                     Err(err) => {
                         if !self.handle_unauthorized(&err) {
@@ -4062,6 +4261,15 @@ impl App {
                         }
                     }
                     self.annotation_summaries = Some(summaries);
+                    if self.filter == Filter::Highlights {
+                        self.rebuild_highlights();
+                        self.total = self.highlights.len();
+                        if self.list_state.selected().is_none() {
+                            self.list_state.select(
+                                (!self.highlights.is_empty()).then_some(0),
+                            );
+                        }
+                    }
                 }
                 Err(err) => {
                     let _ = self.handle_unauthorized(&err);
@@ -4389,6 +4597,16 @@ impl App {
             return;
         };
 
+        if self.filter == Filter::Highlights {
+            self.rebuild_highlights();
+            self.bookmarks.clear();
+            self.total = self.highlights.len();
+            self.list_state
+                .select((!self.highlights.is_empty()).then_some(0));
+            self.list_error = None;
+            self.selected_ids.clear();
+            return;
+        }
         let search = SearchQuery::parse(&self.search);
         let bookmarks = cache.local_bookmarks(&self.filter, &search, self.sort);
         self.total = bookmarks.len();
@@ -5522,6 +5740,122 @@ mod tests {
             }
         }
         assert!(checked, "article text was not rendered");
+    }
+
+    #[test]
+    fn highlights_follow_all_bookmarks_in_the_sidebar() {
+        let mut app = test_app_with_bookmarks(1);
+        app.rebuild_sidebar();
+        let texts: Vec<&str> = app
+            .sidebar_items
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect();
+        let all = texts
+            .iter()
+            .position(|text| *text == "≡  All Bookmarks")
+            .unwrap();
+        assert_eq!(texts[all + 1], "✎  Highlights");
+    }
+
+    #[test]
+    fn highlights_view_renders_annotations() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app_with_bookmarks(1);
+        app.filter = Filter::Highlights;
+        app.annotation_summaries = Some(HashMap::from([(
+            "b1".to_string(),
+            vec![Annotation {
+                id: "a1".into(),
+                bookmark_id: "b1".into(),
+                bookmark_title: "The article".into(),
+                text: "a highlighted sentence".into(),
+                note: "a note".into(),
+                color: "yellow".into(),
+                ..Default::default()
+            }],
+        )]));
+        app.rebuild_highlights();
+        app.list_state.select(Some(0));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        assert!(rows.iter().any(|row| row.contains("Highlights 1")));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("a highlighted sentence"))
+        );
+        assert!(rows.iter().any(|row| row.contains("The article")));
+    }
+
+    #[test]
+    fn opening_a_highlight_scrolls_the_reader() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let dir = std::env::temp_dir()
+            .join(format!("eckly-highlights-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cache = Cache::new(dir.clone());
+        cache.upsert_bookmarks(&[Bookmark {
+            id: "b1".into(),
+            title: Some("Article".into()),
+            has_article: true,
+            ..Default::default()
+        }]);
+        let mut html = String::new();
+        for index in 1..=30 {
+            html.push_str(&format!("<p>paragraph {index}</p>"));
+        }
+        cache.write_article("b1", &html).unwrap();
+        cache.set_annotations(
+            "b1",
+            vec![Annotation {
+                id: "a1".into(),
+                start_selector: "p[30]".into(),
+                start_offset: 0,
+                end_selector: "p[30]".into(),
+                end_offset: 11,
+                text: "paragraph 30".into(),
+                color: "yellow".into(),
+                ..Default::default()
+            }],
+        );
+
+        let mut app = App::with_cache(
+            Config::default(),
+            PathBuf::from("/tmp/eckly-test"),
+            tx,
+            Some(cache),
+            true,
+        );
+        app.screen = Screen::Main;
+        app.filter = Filter::Highlights;
+        app.rebuild_highlights();
+        assert_eq!(app.highlights.len(), 1);
+        app.list_state.select(Some(0));
+
+        app.open_selected_highlight();
+        let reader = app.reader.as_ref().unwrap();
+        let block_line = reader
+            .lines
+            .iter()
+            .position(|line| line.block == Some(29))
+            .unwrap();
+        assert!(reader.scroll <= block_line);
+        assert!(block_line < reader.scroll + reader.viewport);
+        assert!(app.pending_highlight.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

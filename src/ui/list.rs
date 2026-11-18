@@ -10,6 +10,9 @@ use crate::models::ReadStatus;
 use super::theme;
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.filter == crate::models::Filter::Highlights {
+        return draw_highlights(frame, app, area);
+    }
     let focused = app.focus == Focus::List;
     let border = if focused {
         theme::accent()
@@ -152,6 +155,88 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 ]));
             }
 
+            ListItem::new(lines)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(
+            Style::new()
+                .bg(theme::bg_selected())
+                .fg(theme::text())
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▌ ");
+    frame.render_stateful_widget(list, inner, &mut app.list_state);
+}
+
+fn draw_highlights(frame: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == Focus::List;
+    let border = if focused {
+        theme::accent()
+    } else {
+        theme::border()
+    };
+    let title = Line::from(vec![
+        Span::styled(
+            " Highlights ",
+            Style::new()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} ", app.highlights.len()),
+            Style::new().fg(theme::faint()),
+        ),
+    ]);
+    let block = Block::bordered()
+        .border_style(Style::new().fg(border))
+        .title(title);
+    let inner = block.inner(area);
+    app.list_viewport = (inner.height / 2).max(1) as usize;
+    frame.render_widget(block, area);
+
+    if app.highlights.is_empty() {
+        let y = inner.y + inner.height / 2;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "No highlights yet.",
+                Style::new().fg(theme::dim()),
+            )))
+            .alignment(Alignment::Center),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        return;
+    }
+
+    let width = inner.width.saturating_sub(4) as usize;
+    let items: Vec<ListItem> = app
+        .highlights
+        .iter()
+        .map(|annotation| {
+            let color = super::annotation_color(annotation.color());
+            let text = annotation.text.replace('\n', " ");
+            let mut lines = vec![Line::from(vec![
+                Span::styled("▍ ", Style::new().fg(color)),
+                Span::styled(
+                    super::truncate_width(&text, width),
+                    Style::new().fg(theme::text()),
+                ),
+            ])];
+            let mut meta = annotation.bookmark_title.clone();
+            let note = annotation.note.trim();
+            if !note.is_empty() {
+                meta.push_str(&format!(
+                    "  — {}",
+                    super::truncate_width(note, 40)
+                ));
+            }
+            if !meta.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("   {meta}"),
+                    Style::new().fg(theme::dim()),
+                )));
+            }
             ListItem::new(lines)
         })
         .collect();
