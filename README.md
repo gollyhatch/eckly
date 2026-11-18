@@ -150,8 +150,8 @@ environment-based configuration.
 
 ### Offline cache
 
-eckly caches bookmark metadata, labels, collections, the user profile and
-article HTML under:
+eckly caches bookmark metadata, labels, collections, annotations, the user
+profile and article HTML under:
 
 - `$XDG_CACHE_HOME/eckly`, or
 - `~/.cache/eckly` when `XDG_CACHE_HOME` is not set.
@@ -184,10 +184,11 @@ launch. `r` reloads the cache from disk, which is useful after running
 
 ### Sync for offline reading
 
-The `sync` subcommand downloads bookmark metadata and article HTML without
-starting the TUI. Run without flags to sync incrementally: it replays Readeck's
-change log since the previous sync, applies updates, drops bookmarks deleted on
-the server, and downloads the article of every new or changed bookmark.
+The `sync` subcommand downloads bookmark metadata, article HTML and
+annotations without starting the TUI. Run without flags to sync incrementally:
+it replays Readeck's change log since the previous sync, applies updates, drops
+bookmarks deleted on the server, and downloads the article of every new or
+changed bookmark.
 Articles already cached for unchanged bookmarks are left alone. The first run
 has no watermark, so it snapshots the whole library and downloads every article
 that is not cached yet.
@@ -337,7 +338,8 @@ annotates the paragraph at the top of the view, `e` edits its note, `c` cycles
 the color (`yellow`, `red`, `green`, `blue`, `purple`), `d` deletes it and
 `Enter` jumps to it. Highlights created in eckly cover a whole paragraph;
 annotations made in Readeck's web UI are shown on the paragraph that contains
-them. Annotations need a connection to Readeck.
+them. `eckly sync` downloads annotations too, so highlights stay visible
+offline; adding or editing them needs a connection to Readeck.
 
 ### General
 

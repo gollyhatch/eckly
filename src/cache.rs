@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::models::{
-    Bookmark, Collection, Filter, Label, Profile, SearchQuery, Sort,
+    Annotation, Bookmark, Collection, Filter, Label, Profile, SearchQuery, Sort,
 };
 
 const VERSION: u32 = 1;
@@ -26,6 +26,9 @@ struct CacheState {
     profile: Option<Profile>,
     #[serde(default)]
     pending: PendingChanges,
+    /// Annotations downloaded by the last sync, by bookmark.
+    #[serde(default)]
+    annotations: HashMap<String, Vec<Annotation>>,
     /// Server time of the newest change covered by the last incremental sync.
     #[serde(default)]
     last_sync: Option<DateTime<Utc>>,
@@ -52,6 +55,7 @@ impl CacheState {
             collections: Vec::new(),
             profile: None,
             pending: PendingChanges::default(),
+            annotations: HashMap::new(),
             last_sync: None,
         }
     }
@@ -222,6 +226,32 @@ impl Cache {
         }
     }
 
+    pub fn annotations(&self, bookmark_id: &str) -> Vec<Annotation> {
+        self.state
+            .annotations
+            .get(bookmark_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_annotations(
+        &mut self,
+        bookmark_id: &str,
+        annotations: Vec<Annotation>,
+    ) {
+        if annotations.is_empty() {
+            self.state.annotations.remove(bookmark_id);
+        } else {
+            self.state
+                .annotations
+                .insert(bookmark_id.to_string(), annotations);
+        }
+    }
+
+    pub fn bookmark_ids(&self) -> Vec<String> {
+        self.state.bookmarks.keys().cloned().collect()
+    }
+
     pub fn last_sync(&self) -> Option<DateTime<Utc>> {
         self.state.last_sync
     }
@@ -304,6 +334,7 @@ impl Cache {
 
     pub fn remove_bookmark(&mut self, id: &str) {
         self.state.bookmarks.remove(id);
+        self.state.annotations.remove(id);
         self.state.pending.updates.remove(id);
         self.state.pending.deletes.remove(id);
         let _ = self.remove_article(id);
@@ -526,6 +557,37 @@ mod tests {
         );
         assert_eq!(bookmarks.len(), 1);
         assert_eq!(bookmarks[0].labels, vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn caches_annotations_per_bookmark() {
+        let mut cache = temp_cache();
+        cache.upsert_bookmarks(&[Bookmark {
+            id: "one".into(),
+            ..Default::default()
+        }]);
+        cache.set_annotations(
+            "one",
+            vec![Annotation {
+                id: "a1".into(),
+                note: "n".into(),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(cache.annotations("one").len(), 1);
+
+        cache.set_annotations("one", Vec::new());
+        assert!(cache.annotations("one").is_empty());
+
+        cache.set_annotations(
+            "one",
+            vec![Annotation {
+                id: "a1".into(),
+                ..Default::default()
+            }],
+        );
+        cache.remove_bookmark("one");
+        assert!(cache.annotations("one").is_empty());
     }
 
     #[test]

@@ -300,6 +300,9 @@ pub struct Annotation {
     pub end_offset: usize,
     #[serde(default)]
     pub color: String,
+    /// Set by the global annotation list, empty on a bookmark's list.
+    #[serde(default)]
+    pub bookmark_id: String,
     #[serde(default, deserialize_with = "deserialize_entity_string")]
     pub text: String,
     #[serde(default, deserialize_with = "deserialize_entity_string")]

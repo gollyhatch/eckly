@@ -1763,6 +1763,11 @@ impl App {
             self.config.text_width,
             !self.config.text_align.trim().eq_ignore_ascii_case("left"),
         );
+        reader.annotations = self
+            .cache
+            .as_ref()
+            .map(|cache| cache.annotations(&bookmark.id))
+            .unwrap_or_default();
         if self.offline_mode {
             let cached = self
                 .cache
@@ -1829,7 +1834,7 @@ impl App {
     }
 
     fn request_annotations(&mut self, bookmark_id: &str) {
-        if self.offline_mode {
+        if self.offline_mode || self.offline {
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -1850,10 +1855,6 @@ impl App {
         let Some(reader) = &self.reader else {
             return;
         };
-        if self.offline_mode || self.offline {
-            self.toast_error("Annotations require a connection to Readeck");
-            return;
-        }
         let bookmark_id = reader.bookmark.id.clone();
         let block = reader.block_at_scroll();
         self.modal = Some(Modal::Annotations(AnnotationsModal {
@@ -1909,6 +1910,10 @@ impl App {
         color: String,
         note: String,
     ) {
+        if self.offline_mode || self.offline {
+            self.toast_error("Annotations require a connection to Readeck");
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1928,6 +1933,10 @@ impl App {
     }
 
     fn delete_annotation(&mut self, bookmark_id: String, id: String) {
+        if self.offline_mode || self.offline {
+            self.toast_error("Annotations require a connection to Readeck");
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1940,6 +1949,18 @@ impl App {
                 result,
             }));
         });
+    }
+
+    fn store_reader_annotations(&mut self) {
+        let Some(reader) = &self.reader else {
+            return;
+        };
+        let bookmark_id = reader.bookmark.id.clone();
+        let annotations = reader.annotations.clone();
+        if let Some(cache) = &mut self.cache {
+            cache.set_annotations(&bookmark_id, annotations);
+            let _ = cache.save();
+        }
     }
 
     fn edit_annotation_note(
@@ -3303,6 +3324,7 @@ impl App {
                         if let Some(reader) = &mut self.reader {
                             reader.annotations = annotations;
                         }
+                        self.store_reader_annotations();
                     }
                     Err(err) => {
                         if !self.handle_unauthorized(&err) {
@@ -3323,6 +3345,7 @@ impl App {
                             reader.annotations.push(annotation);
                         }
                     }
+                    self.store_reader_annotations();
                     self.toast_success("Annotation added");
                 }
                 Err(err) => {
@@ -3358,6 +3381,7 @@ impl App {
                             }
                         }
                     }
+                    self.store_reader_annotations();
                     self.toast_success("Annotation updated");
                 }
                 Err(err) => {
@@ -3381,6 +3405,7 @@ impl App {
                                 .retain(|annotation| annotation.id != id);
                         }
                     }
+                    self.store_reader_annotations();
                     self.toast_success("Annotation deleted");
                 }
                 Err(err) => {
@@ -4520,6 +4545,40 @@ mod tests {
         // Left border, the " / " prompt, then the four typed characters.
         let position = terminal.backend_mut().get_cursor_position().unwrap();
         assert_eq!((position.x, position.y), (8, 1));
+    }
+
+    #[test]
+    fn offline_reader_uses_cached_annotations() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut cache = Cache::new(
+            std::env::temp_dir()
+                .join(format!("eckly-annotations-test-{}", std::process::id())),
+        );
+        cache.set_annotations(
+            "b1",
+            vec![Annotation {
+                id: "a1".into(),
+                start_selector: "p[1]".into(),
+                ..Default::default()
+            }],
+        );
+        let mut app = App::with_cache(
+            Config::default(),
+            PathBuf::from("/tmp/eckly-test"),
+            tx,
+            Some(cache),
+            true,
+        );
+        app.screen = Screen::Main;
+        app.bookmarks = vec![Bookmark {
+            id: "b1".into(),
+            description: Some("An article".into()),
+            ..Default::default()
+        }];
+        app.list_state.select(Some(0));
+
+        app.open_reader();
+        assert_eq!(app.reader.as_ref().unwrap().annotations.len(), 1);
     }
 
     #[test]

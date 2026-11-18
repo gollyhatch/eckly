@@ -16,6 +16,7 @@ use crate::models::{
 };
 
 const PAGE_SIZE: usize = 100;
+const ANNOTATION_PAGE_SIZE: usize = 100;
 
 const PROGRESS_TEMPLATE: &str = "{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}";
 
@@ -197,11 +198,12 @@ async fn sync_lists(
         .filter(|bookmark| needs_article(bookmark, &changed, cache))
         .collect();
     download_articles(client, cache_dir, articles, interactive).await?;
+    download_annotations(client, cache, interactive).await?;
 
     if let Some(watermark) = watermark {
         cache.set_last_sync(watermark);
-        cache.save().context("could not save bookmark cache")?;
     }
+    cache.save().context("could not save bookmark cache")?;
     Ok(())
 }
 
@@ -333,6 +335,7 @@ async fn sync_changes(
     }
 
     download_articles(client, cache_dir, articles, interactive).await?;
+    download_annotations(client, cache, interactive).await?;
 
     // Only advance the watermark once every change was applied; otherwise the
     // next run would skip whatever failed here.
@@ -498,6 +501,70 @@ async fn download_bookmark_lists(
     }
 
     Ok(bookmarks)
+}
+
+/// Download annotations for every annotated bookmark and drop stale ones.
+async fn download_annotations(
+    client: &ReadeckClient,
+    cache: &mut Cache,
+    interactive: bool,
+) -> Result<()> {
+    let mut annotated: HashSet<String> = HashSet::new();
+    let mut offset = 0;
+    loop {
+        let page = client
+            .annotations_page(ANNOTATION_PAGE_SIZE, offset)
+            .await
+            .context("could not list annotations")?;
+        if page.items.is_empty() {
+            break;
+        }
+        let count = page.items.len();
+        for annotation in page.items {
+            if !annotation.bookmark_id.is_empty() {
+                annotated.insert(annotation.bookmark_id);
+            }
+        }
+        offset += count;
+        if offset >= page.total {
+            break;
+        }
+    }
+
+    let known: HashSet<String> = cache.bookmark_ids().into_iter().collect();
+    let annotated: HashSet<String> = annotated
+        .into_iter()
+        .filter(|id| known.contains(id))
+        .collect();
+
+    let progress = make_progress(annotated.len() as u64, interactive);
+    progress.set_message("Downloading annotations...");
+    let mut synced = 0usize;
+    let mut errors = Vec::new();
+    for bookmark_id in &annotated {
+        match client.annotations(bookmark_id).await {
+            Ok(annotations) => {
+                synced += annotations.len();
+                cache.set_annotations(bookmark_id, annotations);
+            }
+            Err(err) => errors.push(format!("{bookmark_id}: {err}")),
+        }
+        progress.inc(1);
+    }
+    for bookmark_id in &known {
+        if !annotated.contains(bookmark_id) {
+            cache.set_annotations(bookmark_id, Vec::new());
+        }
+    }
+    progress.finish_with_message(format!("Synced {synced} annotation(s)"));
+
+    if !errors.is_empty() {
+        for error in &errors {
+            eprintln!("{error}");
+        }
+        bail!("{} annotation list(s) failed to sync", errors.len());
+    }
+    Ok(())
 }
 
 async fn download_articles(

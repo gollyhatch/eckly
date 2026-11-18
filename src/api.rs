@@ -333,6 +333,31 @@ impl ReadeckClient {
         Ok(response.json::<Vec<Annotation>>().await?)
     }
 
+    /// One page of every annotation in the library.
+    pub async fn annotations_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Page<Annotation>, ApiError> {
+        let response = self
+            .http
+            .get(self.endpoint("/bookmarks/annotations"))
+            .bearer_auth(self.token.as_ref())
+            .query(&[
+                ("limit", limit.to_string()),
+                ("offset", offset.to_string()),
+            ])
+            .send()
+            .await?;
+        let total = header_usize(&response, "Total-Count").unwrap_or(0);
+        let response = ensure_ok(response).await?;
+        let items = response.json::<Vec<Annotation>>().await?;
+        Ok(Page {
+            total: if total == 0 { items.len() } else { total },
+            items,
+        })
+    }
+
     /// Highlight a range of the article. Selectors are Readeck annotation
     /// selectors (`tag[n]/...`), offsets count characters in that element.
     pub async fn create_annotation(
@@ -1009,6 +1034,26 @@ mod tests {
         let request = server.await.unwrap();
         assert!(
             request.starts_with("DELETE /api/bookmarks/b1/annotations/a2 ")
+        );
+    }
+
+    #[tokio::test]
+    async fn lists_annotations_over_http() {
+        let body = r#"[{"id":"a1","bookmark_id":"b1","text":"t",
+            "color":"yellow"}]"#;
+        let (base, server) =
+            serve_once(response("200 OK", "Total-Count: 7\r\n", body), false)
+                .await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        let page = client.annotations_page(50, 10).await.unwrap();
+        assert_eq!(page.total, 7);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].bookmark_id, "b1");
+        let request = server.await.unwrap();
+        assert!(
+            request.starts_with(
+                "GET /api/bookmarks/annotations?limit=50&offset=10 "
+            )
         );
     }
 
