@@ -14,6 +14,40 @@ where
         .map(|dt| dt.with_timezone(&Utc)))
 }
 
+fn decode_entities(value: &str) -> String {
+    html_escape::decode_html_entities(value).into_owned()
+}
+
+fn deserialize_opt_entity_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.map(|value| decode_entities(&value)))
+}
+
+fn deserialize_entity_string<'de, D>(
+    deserializer: D,
+) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    Ok(decode_entities(&value))
+}
+
+fn deserialize_entity_list<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    Ok(values.iter().map(|value| decode_entities(value)).collect())
+}
+
 /// A bookmark as returned by `GET /api/bookmarks` or `GET /api/bookmarks/{id}`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Bookmark {
@@ -23,19 +57,19 @@ pub struct Bookmark {
     pub created: Option<DateTime<Utc>>,
     #[serde(default)]
     pub url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_entity_string")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_entity_string")]
     pub site_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_entity_string")]
     pub site: Option<String>,
     #[serde(default, deserialize_with = "deserialize_opt_datetime")]
     pub published: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_entity_list")]
     pub authors: Vec<String>,
     #[serde(default)]
     pub has_article: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_entity_string")]
     pub description: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
@@ -47,7 +81,7 @@ pub struct Bookmark {
     pub is_archived: bool,
     #[serde(default)]
     pub read_progress: u8,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_entity_list")]
     pub labels: Vec<String>,
     #[serde(default)]
     pub word_count: u32,
@@ -219,7 +253,7 @@ impl BookmarkPatch {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Label {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_entity_string")]
     pub name: String,
     #[serde(default)]
     pub count: usize,
@@ -229,7 +263,7 @@ pub struct Label {
 pub struct Collection {
     #[serde(default)]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_entity_string")]
     pub name: String,
     #[serde(default)]
     pub is_pinned: bool,
@@ -987,6 +1021,36 @@ mod tests {
         assert!(bookmark.has_article);
         assert_eq!(bookmark.reading_time, 6);
         assert_eq!(bookmark.labels, vec!["rust", "tui"]);
+    }
+
+    #[test]
+    fn decodes_html_entities_in_metadata() {
+        let bookmark: Bookmark = serde_json::from_str(
+            r#"{
+                "id":"x",
+                "url":"https://example.com",
+                "title":"&#34;Ziemlich dumm&#34;: Pistorius",
+                "description":"A &amp; B",
+                "site_name":"&quot;Example&quot;",
+                "site":"example.com",
+                "authors":["M&#252;ller","Smith &amp; Wesson"],
+                "labels":["a&amp;b","caf&#233;"]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(bookmark.display_title(), "\"Ziemlich dumm\": Pistorius");
+        assert_eq!(bookmark.description.as_deref(), Some("A & B"));
+        assert_eq!(bookmark.site_name.as_deref(), Some("\"Example\""));
+        assert_eq!(bookmark.host(), "\"Example\"");
+        assert_eq!(bookmark.authors, vec!["Müller", "Smith & Wesson"]);
+        assert_eq!(bookmark.labels, vec!["a&b", "café"]);
+
+        let label: Label =
+            serde_json::from_str(r#"{"name":"caf&#233;","count":2}"#).unwrap();
+        assert_eq!(label.name, "café");
+        let collection: Collection =
+            serde_json::from_str(r#"{"id":"c","name":"A &amp; B"}"#).unwrap();
+        assert_eq!(collection.name, "A & B");
     }
 
     #[test]
