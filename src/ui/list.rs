@@ -210,13 +210,14 @@ fn draw_highlights(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let width = inner.width.saturating_sub(4).max(8) as usize;
-    let items: Vec<ListItem> = app
-        .highlights
-        .iter()
-        .map(|annotation| {
-            let color = super::annotation_color(annotation.color());
-            let mut lines = Vec::new();
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.highlights.len());
+    let mut previous_bookmark = String::new();
+    for annotation in &app.highlights {
+        let color = super::annotation_color(annotation.color());
+        let mut lines = Vec::new();
 
+        // The bookmark title opens the group and is not repeated.
+        if annotation.bookmark_id != previous_bookmark {
             let title = if annotation.bookmark_title.trim().is_empty() {
                 annotation.bookmark_url.trim()
             } else {
@@ -228,50 +229,49 @@ fn draw_highlights(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::new().fg(theme::dim()).add_modifier(Modifier::BOLD),
                 )));
             }
+            previous_bookmark = annotation.bookmark_id.clone();
+        }
 
-            let text = annotation.text.replace('\n', " ");
+        let text = annotation.text.replace('\n', " ");
+        let options = textwrap::Options::new(width)
+            .initial_indent("▍ ")
+            .subsequent_indent("  ")
+            .break_words(true);
+        for (index, wrapped) in
+            textwrap::wrap(&text, options).into_iter().enumerate()
+        {
+            let wrapped = wrapped.into_owned();
+            if index == 0 {
+                let content =
+                    wrapped.strip_prefix("▍ ").unwrap_or(&wrapped).to_string();
+                lines.push(Line::from(vec![
+                    Span::styled("▍ ", Style::new().fg(color)),
+                    Span::styled(content, Style::new().fg(theme::text())),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    wrapped,
+                    Style::new().fg(theme::text()),
+                )));
+            }
+        }
+
+        let note = annotation.note.trim().replace('\n', " ");
+        if !note.is_empty() {
             let options = textwrap::Options::new(width)
-                .initial_indent("▍ ")
-                .subsequent_indent("  ")
+                .initial_indent("  — ")
+                .subsequent_indent("    ")
                 .break_words(true);
-            for (index, wrapped) in
-                textwrap::wrap(&text, options).into_iter().enumerate()
-            {
-                let wrapped = wrapped.into_owned();
-                if index == 0 {
-                    let content = wrapped
-                        .strip_prefix("▍ ")
-                        .unwrap_or(&wrapped)
-                        .to_string();
-                    lines.push(Line::from(vec![
-                        Span::styled("▍ ", Style::new().fg(color)),
-                        Span::styled(content, Style::new().fg(theme::text())),
-                    ]));
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        wrapped,
-                        Style::new().fg(theme::text()),
-                    )));
-                }
+            for wrapped in textwrap::wrap(&note, options) {
+                lines.push(Line::from(Span::styled(
+                    wrapped.into_owned(),
+                    Style::new().fg(theme::dim()),
+                )));
             }
+        }
 
-            let note = annotation.note.trim().replace('\n', " ");
-            if !note.is_empty() {
-                let options = textwrap::Options::new(width)
-                    .initial_indent("  — ")
-                    .subsequent_indent("    ")
-                    .break_words(true);
-                for wrapped in textwrap::wrap(&note, options) {
-                    lines.push(Line::from(Span::styled(
-                        wrapped.into_owned(),
-                        Style::new().fg(theme::dim()),
-                    )));
-                }
-            }
-
-            ListItem::new(lines)
-        })
-        .collect();
+        items.push(ListItem::new(lines));
+    }
 
     let list = List::new(items)
         .highlight_style(

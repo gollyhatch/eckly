@@ -1141,8 +1141,30 @@ impl App {
                 }
             }
         }
-        highlights.sort_by_key(|a| std::cmp::Reverse(a.created));
-        self.highlights = highlights;
+        // Group by bookmark, most recently highlighted first, and order each
+        // group by the highlight's position in the article.
+        let mut groups: HashMap<String, Vec<Annotation>> = HashMap::new();
+        for annotation in highlights {
+            groups
+                .entry(annotation.bookmark_id.clone())
+                .or_default()
+                .push(annotation);
+        }
+        let mut groups: Vec<Vec<Annotation>> = groups.into_values().collect();
+        for group in &mut groups {
+            group.sort_by_key(|annotation| {
+                (
+                    annotation.start_selector.trim().is_empty(),
+                    selector_position(&annotation.start_selector),
+                    annotation.start_offset,
+                    annotation.created,
+                )
+            });
+        }
+        groups.sort_by_key(|group| {
+            std::cmp::Reverse(group.iter().filter_map(|a| a.created).max())
+        });
+        self.highlights = groups.into_iter().flatten().collect();
     }
 
     fn list_len(&self) -> usize {
@@ -5056,6 +5078,26 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     Ok(value)
 }
 
+/// Position of an annotation selector in the article: `p[2]` or
+/// `section[1]/ul[1]/li[3]`. `None` for an empty or malformed selector.
+fn selector_position(selector: &str) -> Option<Vec<(String, usize)>> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return None;
+    }
+    let mut position = Vec::new();
+    for part in selector.split('/') {
+        let open = part.rfind('[')?;
+        let close = part.rfind(']')?;
+        if close != part.len() - 1 || open == 0 || open >= close {
+            return None;
+        }
+        let index = part[open + 1..close].parse().ok()?;
+        position.push((part[..open].to_string(), index));
+    }
+    Some(position)
+}
+
 fn fallback_article(bookmark: &Bookmark) -> Article {
     let mut blocks = Vec::new();
     if let Some(description) = bookmark
@@ -5890,6 +5932,101 @@ mod tests {
         let note_row =
             rows.iter().position(|row| row.contains("a note")).unwrap();
         assert!(note_row > last_row);
+    }
+
+    #[test]
+    fn highlights_group_by_bookmark_and_follow_article_order() {
+        let created = |day: u32| {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(&format!(
+                    "2026-11-{day:02}T00:00:00Z"
+                ))
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            )
+        };
+        let annotation =
+            |id: &str, bookmark: &str, selector: &str, day: u32| Annotation {
+                id: id.into(),
+                bookmark_id: bookmark.into(),
+                bookmark_title: bookmark.into(),
+                start_selector: selector.into(),
+                created: created(day),
+                text: id.into(),
+                ..Default::default()
+            };
+        let mut app = test_app_with_bookmarks(1);
+        app.annotation_summaries = Some(HashMap::from([
+            (
+                "b1".to_string(),
+                vec![
+                    annotation("a2", "b1", "p[5]", 2),
+                    annotation("a1", "b1", "p[2]", 1),
+                    annotation("a4", "b1", "section[1]/ul[1]/li[3]", 3),
+                ],
+            ),
+            ("b2".to_string(), vec![annotation("a3", "b2", "p[1]", 4)]),
+        ]));
+
+        app.rebuild_highlights();
+
+        let ids: Vec<&str> =
+            app.highlights.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["a3", "a1", "a2", "a4"]);
+    }
+
+    #[test]
+    fn highlights_show_the_bookmark_title_once() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app_with_bookmarks(1);
+        app.filter = Filter::Highlights;
+        let annotation = |id: &str, selector: &str, text: &str| Annotation {
+            id: id.into(),
+            bookmark_id: "b1".into(),
+            bookmark_title: "The article".into(),
+            start_selector: selector.into(),
+            text: text.into(),
+            ..Default::default()
+        };
+        app.annotation_summaries = Some(HashMap::from([(
+            "b1".to_string(),
+            vec![
+                annotation("a1", "p[1]", "first highlight"),
+                annotation("a2", "p[2]", "second highlight"),
+            ],
+        )]));
+        app.rebuild_highlights();
+        app.list_state.select(Some(0));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.contains("The article"))
+                .count(),
+            1
+        );
+        let first = rows
+            .iter()
+            .position(|row| row.contains("first highlight"))
+            .unwrap();
+        let second = rows
+            .iter()
+            .position(|row| row.contains("second highlight"))
+            .unwrap();
+        assert!(first < second);
     }
 
     #[test]
