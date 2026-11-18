@@ -11,6 +11,8 @@ use crate::article::{BlockKind, ImageCell};
 use crate::models::ReadStatus;
 use crate::speed::SpeedReader;
 
+use unicode_width::UnicodeWidthChar;
+
 use super::theme;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -26,12 +28,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let reader_meta;
     let reader_search;
     let speed_reading;
+    let selecting;
 
     {
         let Some(reader) = app.reader.as_mut() else {
             return;
         };
         speed_reading = reader.speed.is_some();
+        selecting = reader.selection.is_some();
 
         let block = Block::bordered()
             .border_style(Style::new().fg(theme::border()))
@@ -197,34 +201,65 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     });
                 }
             }
+            let bounds = reader.selected_bounds();
             let visible: Vec<Line> = reader
                 .lines
                 .iter()
+                .enumerate()
                 .skip(reader.scroll)
                 .take(reader.viewport)
-                .map(|line| {
-                    let mut rendered = if let Some(cells) = &line.image {
-                        image_line(cells, content_width as usize)
-                    } else {
-                        article_line(
-                            &line.text,
-                            block_style(line.kind),
-                            reader.search_query.as_deref(),
-                        )
-                    };
+                .map(|(index, line)| {
+                    if let Some(cells) = &line.image {
+                        return image_line(cells, content_width as usize);
+                    }
+                    let mut base = block_style(line.kind);
                     if let Some(color) = line
                         .block
                         .and_then(|block| annotated_blocks.get(&block))
-                        .copied()
                     {
-                        for span in &mut rendered.spans {
-                            span.style = span.style.fg(color);
-                        }
+                        base = base.fg(*color);
                     }
-                    rendered
+                    if let Some((from, to)) =
+                        selection_span(bounds, index, line)
+                    {
+                        return selection_line(line, base, from, to);
+                    }
+                    article_line(
+                        &line.text,
+                        base,
+                        reader.search_query.as_deref(),
+                    )
                 })
                 .collect();
             frame.render_widget(Paragraph::new(visible), content_area);
+
+            if let Some(selection) = reader.selection {
+                let position = selection.cursor;
+                if position.line >= reader.scroll
+                    && position.line < reader.scroll + reader.viewport
+                {
+                    let line = &reader.lines[position.line];
+                    let indent = indent_chars(&line.text, line.indent);
+                    let length = line
+                        .range
+                        .as_ref()
+                        .map(|range| range.end - range.start)
+                        .unwrap_or(0);
+                    let used: usize = line
+                        .text
+                        .chars()
+                        .skip(indent)
+                        .take(position.offset.min(length))
+                        .map(|ch| ch.width().unwrap_or(0))
+                        .sum();
+                    let column = (line.indent + used)
+                        .min(content_area.width.saturating_sub(1) as usize);
+                    let x = content_area.x + column as u16;
+                    let y =
+                        content_area.y + (position.line - reader.scroll) as u16;
+                    frame.set_cursor_position((x, y));
+                }
+            }
 
             let max = reader.max_scroll().saturating_add(1);
             if max > 1 {
@@ -274,7 +309,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
             .areas(footer_area);
 
-    let hints = if speed_reading {
+    let hints = if selecting {
+        "  h/j/k/l move · Enter/Space start or finish selection · Esc cancel"
+    } else if speed_reading {
         "  Space pause/resume · h/l word · +/- words per minute · s or Esc back to article"
     } else {
         "  j/k scroll · Space paragraph · Ctrl+d/u half · g/G top/bottom · H annotations · s speed read · m read · f favorite · a archive · t labels · i images · o browser · Esc back"
@@ -420,6 +457,86 @@ fn image_line(cells: &[ImageCell], width: usize) -> Line<'static> {
             "▀",
             Style::new().fg(blend(cell.top)).bg(blend(cell.bottom)),
         ));
+    }
+    Line::from(spans)
+}
+
+fn indent_chars(text: &str, indent: usize) -> usize {
+    if indent == 0 {
+        return 0;
+    }
+    let mut width = 0;
+    for (index, ch) in text.chars().enumerate() {
+        width += ch.width().unwrap_or(0);
+        if width >= indent {
+            return index + 1;
+        }
+    }
+    0
+}
+
+fn selection_span(
+    bounds: Option<(crate::app::TextPos, crate::app::TextPos)>,
+    line: usize,
+    wrapped: &crate::article::WrappedLine,
+) -> Option<(usize, usize)> {
+    let (start, end) = bounds?;
+    if line < start.line || line > end.line {
+        return None;
+    }
+    let length = wrapped
+        .range
+        .as_ref()
+        .map(|range| range.end - range.start)?;
+    let from = if line == start.line { start.offset } else { 0 };
+    let to = if line == end.line { end.offset } else { length };
+    let from = from.min(length);
+    let to = to.min(length);
+    if from >= to {
+        return None;
+    }
+    Some((from, to))
+}
+
+fn selection_line(
+    wrapped: &crate::article::WrappedLine,
+    base: Style,
+    from: usize,
+    to: usize,
+) -> Line<'static> {
+    let indent = indent_chars(&wrapped.text, wrapped.indent);
+    let chars: Vec<char> = wrapped.text.chars().collect();
+    let mut spans = Vec::new();
+    if indent > 0 {
+        spans.push(Span::styled(
+            chars[..indent].iter().collect::<String>(),
+            base,
+        ));
+    }
+    let content = &chars[indent..];
+    let selected = Style::new()
+        .bg(theme::bg_selected())
+        .fg(theme::text())
+        .add_modifier(Modifier::BOLD);
+    if from > 0 {
+        spans.push(Span::styled(
+            content[..from.min(content.len())]
+                .iter()
+                .collect::<String>(),
+            base,
+        ));
+    }
+    let from = from.min(content.len());
+    let to = to.min(content.len());
+    if to > from {
+        spans.push(Span::styled(
+            content[from..to].iter().collect::<String>(),
+            selected,
+        ));
+    }
+    if to < content.len() {
+        spans
+            .push(Span::styled(content[to..].iter().collect::<String>(), base));
     }
     Line::from(spans)
 }

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use ego_tree::NodeRef;
 use image::DynamicImage;
 use scraper::{Html, Node};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockKind {
@@ -38,6 +39,8 @@ pub struct Source {
     pub path: String,
     /// Length of the element's text in characters.
     pub len: usize,
+    /// For each character of the block text, its offset in the element text.
+    pub offsets: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,6 +68,10 @@ pub struct WrappedLine {
     pub image: Option<Vec<ImageCell>>,
     /// Index of the block this line belongs to.
     pub block: Option<usize>,
+    /// Character range of the block text shown on this line.
+    pub range: Option<std::ops::Range<usize>>,
+    /// Leading columns added by the block style (quote bar, code indent).
+    pub indent: usize,
 }
 
 impl Article {
@@ -97,6 +104,8 @@ impl Article {
                     kind: None,
                     image: None,
                     block: None,
+                    range: None,
+                    indent: 0,
                 });
             }
 
@@ -133,6 +142,8 @@ impl Article {
                             kind: Some(BlockKind::Image),
                             image: None,
                             block: Some(index),
+                            range: None,
+                            indent: 0,
                         });
                     }
                 }
@@ -146,6 +157,8 @@ impl Article {
                     kind: Some(BlockKind::Rule),
                     image: None,
                     block: Some(index),
+                    range: None,
+                    indent: 0,
                 });
                 previous = Some(block.kind);
                 continue;
@@ -158,17 +171,19 @@ impl Article {
                 BlockKind::Caption => ("  ", "  "),
                 _ => ("", ""),
             };
-            let options = textwrap::Options::new(width)
-                .initial_indent(initial_indent)
-                .subsequent_indent(subsequent_indent)
-                .break_words(true);
-
-            for line in textwrap::wrap(&block.text, options) {
+            for (start, end, text, indent) in wrap_block(
+                &block.text,
+                width,
+                initial_indent,
+                subsequent_indent,
+            ) {
                 lines.push(WrappedLine {
-                    text: line.into_owned(),
+                    text,
                     kind: Some(block.kind),
                     image: None,
                     block: Some(index),
+                    range: Some(start..end),
+                    indent,
                 });
             }
             previous = Some(block.kind);
@@ -198,6 +213,70 @@ impl Article {
             sources,
         }
     }
+}
+
+/// Greedy wrap that reports which block characters each line shows.
+fn wrap_block(
+    text: &str,
+    width: usize,
+    initial_indent: &str,
+    subsequent_indent: &str,
+) -> Vec<(usize, usize, String, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut first = true;
+    while start < chars.len() {
+        while start < chars.len() && chars[start].is_whitespace() {
+            start += 1;
+        }
+        if start >= chars.len() {
+            break;
+        }
+        let indent = if first {
+            initial_indent
+        } else {
+            subsequent_indent
+        };
+        let indent_width = indent.width();
+        let available = width.saturating_sub(indent_width).max(1);
+        let mut used = 0;
+        let mut end = start;
+        let mut last_space = None;
+        while end < chars.len() {
+            let char_width = UnicodeWidthChar::width(chars[end]).unwrap_or(0);
+            if used + char_width > available {
+                break;
+            }
+            if chars[end].is_whitespace() {
+                last_space = Some(end);
+            }
+            used += char_width;
+            end += 1;
+        }
+        if end == start {
+            end = start + 1;
+        }
+        let mut cut = end;
+        if end < chars.len() {
+            if let Some(space) = last_space {
+                if space > start {
+                    cut = space;
+                }
+            }
+        }
+        while cut > start && chars[cut - 1].is_whitespace() {
+            cut -= 1;
+        }
+        if cut == start {
+            cut = end;
+        }
+        let content: String = chars[start..cut].iter().collect();
+        lines.push((start, cut, format!("{indent}{content}"), indent_width));
+        start = if cut > start { cut } else { end };
+        first = false;
+    }
+    lines
 }
 
 fn render_image(image: &DynamicImage, width: usize) -> Vec<WrappedLine> {
@@ -240,6 +319,8 @@ fn render_image(image: &DynamicImage, width: usize) -> Vec<WrappedLine> {
             kind: Some(BlockKind::Image),
             image: Some(cells),
             block: None,
+            range: None,
+            indent: 0,
         });
     }
     rows
@@ -268,7 +349,17 @@ pub fn parse_article(html: &str) -> Article {
     let sources = collector
         .block_sources
         .iter()
-        .map(|index| index.map(|i| collector.sources[i].clone()))
+        .enumerate()
+        .map(|(block, index)| {
+            index.map(|index| {
+                let source = &collector.sources[index];
+                Source {
+                    path: source.path.clone(),
+                    len: source.len,
+                    offsets: collector.block_offsets[block].clone(),
+                }
+            })
+        })
         .collect();
     Article {
         blocks: collector.blocks,
@@ -305,8 +396,11 @@ struct Collector<'a> {
     body: NodeRef<'a, Node>,
     blocks: Vec<Block>,
     block_sources: Vec<Option<usize>>,
+    block_offsets: Vec<Vec<usize>>,
     sources: Vec<Source>,
+    source_counters: HashMap<usize, usize>,
     buffer: String,
+    buffer_offsets: Vec<usize>,
     images: HashMap<usize, String>,
 }
 
@@ -316,15 +410,60 @@ impl<'a> Collector<'a> {
             body,
             blocks: Vec::new(),
             block_sources: Vec::new(),
+            block_offsets: Vec::new(),
             sources: Vec::new(),
+            source_counters: HashMap::new(),
             buffer: String::new(),
+            buffer_offsets: Vec::new(),
             images: HashMap::new(),
         }
     }
 
-    fn push_block(&mut self, block: Block, source: Option<usize>) {
+    fn push_block(
+        &mut self,
+        block: Block,
+        source: Option<usize>,
+        offsets: Vec<usize>,
+    ) {
         self.blocks.push(block);
         self.block_sources.push(source);
+        self.block_offsets.push(offsets);
+    }
+
+    fn push_text(&mut self, text: &str, source: Option<usize>) {
+        let mut offset = source
+            .and_then(|source| self.source_counters.get(&source).copied())
+            .unwrap_or(0);
+        for ch in text.chars() {
+            self.buffer.push(ch);
+            self.buffer_offsets.push(offset);
+            if source.is_some() {
+                offset += 1;
+            }
+        }
+        if let Some(source) = source {
+            self.source_counters.insert(source, offset);
+        }
+    }
+
+    fn push_synthetic(&mut self, text: &str, source: Option<usize>) {
+        let offset = source
+            .and_then(|source| self.source_counters.get(&source).copied())
+            .unwrap_or(0);
+        for ch in text.chars() {
+            self.buffer.push(ch);
+            self.buffer_offsets.push(offset);
+        }
+    }
+
+    fn skip_text(&mut self, node: NodeRef<'_, Node>, source: Option<usize>) {
+        if let Some(source) = source {
+            let len = text_content(node).chars().count();
+            self.source_counters
+                .entry(source)
+                .and_modify(|offset| *offset += len)
+                .or_insert(len);
+        }
     }
 
     fn source_for(&mut self, node: NodeRef<'_, Node>) -> Option<usize> {
@@ -333,13 +472,17 @@ impl<'a> Collector<'a> {
         if len == 0 {
             return None;
         }
-        self.sources.push(Source { path, len });
+        self.sources.push(Source {
+            path,
+            len,
+            offsets: Vec::new(),
+        });
         Some(self.sources.len() - 1)
     }
 
     fn walk(&mut self, node: NodeRef<'_, Node>, context: Context) {
         if let Some(text) = node.value().as_text() {
-            self.buffer.push_str(&text.text);
+            self.push_text(&text.text, context.source);
             return;
         }
 
@@ -355,9 +498,11 @@ impl<'a> Collector<'a> {
             "script" | "style" | "noscript" | "template" | "svg" | "head"
             | "title" | "meta" | "link" | "nav" | "footer" | "form"
             | "button" | "input" | "select" | "textarea" | "iframe"
-            | "video" | "audio" | "canvas" | "object" | "embed" => (),
+            | "video" | "audio" | "canvas" | "object" | "embed" => {
+                self.skip_text(node, context.source);
+            }
             "br" => {
-                self.buffer.push(' ');
+                self.push_synthetic(" ", context.source);
             }
             "img" => {
                 let alt = element.attr("alt").unwrap_or("").trim().to_string();
@@ -373,13 +518,12 @@ impl<'a> Collector<'a> {
                             text: alt,
                         },
                         None,
+                        Vec::new(),
                     );
                     let index = self.blocks.len() - 1;
                     self.images.insert(index, src.to_string());
                 } else if !alt.is_empty() {
-                    self.buffer.push(' ');
-                    self.buffer.push_str(&alt);
-                    self.buffer.push(' ');
+                    self.push_synthetic(&format!(" {alt} "), context.source);
                 }
             }
             "hr" => {
@@ -390,19 +534,21 @@ impl<'a> Collector<'a> {
                         text: String::new(),
                     },
                     None,
+                    Vec::new(),
                 );
             }
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 self.flush(context);
-                let text = normalize(&text_content(node));
-                if !text.is_empty() {
+                let raw = text_content(node);
+                if !normalize(&raw).is_empty() {
                     let kind = match name {
                         "h1" => BlockKind::Heading1,
                         "h2" => BlockKind::Heading2,
                         _ => BlockKind::Heading3,
                     };
                     let source = self.source_for(node);
-                    self.push_block(Block { kind, text }, source);
+                    let (text, offsets) = normalize_and_index(&raw);
+                    self.push_block(Block { kind, text }, source, offsets);
                 }
             }
             "pre" => {
@@ -424,6 +570,7 @@ impl<'a> Collector<'a> {
                                 text: String::new(),
                             },
                             None,
+                            Vec::new(),
                         );
                     } else {
                         self.push_block(
@@ -432,6 +579,7 @@ impl<'a> Collector<'a> {
                                 text: line.to_string(),
                             },
                             None,
+                            Vec::new(),
                         );
                     }
                 }
@@ -456,6 +604,7 @@ impl<'a> Collector<'a> {
                             text: cells.join("  ·  "),
                         },
                         None,
+                        Vec::new(),
                     );
                 }
             }
@@ -495,15 +644,17 @@ impl<'a> Collector<'a> {
             }
             "figcaption" => {
                 self.flush(context);
-                let text = normalize(&text_content(node));
-                if !text.is_empty() {
+                let raw = text_content(node);
+                if !normalize(&raw).is_empty() {
                     let source = self.source_for(node);
+                    let (text, offsets) = normalize_and_index(&raw);
                     self.push_block(
                         Block {
                             kind: BlockKind::Caption,
                             text,
                         },
                         source,
+                        offsets,
                     );
                 }
             }
@@ -525,20 +676,32 @@ impl<'a> Collector<'a> {
     }
 
     fn flush(&mut self, context: Context) {
-        let text = normalize(&self.buffer);
-        self.buffer.clear();
+        let raw = std::mem::take(&mut self.buffer);
+        let raw_offsets = std::mem::take(&mut self.buffer_offsets);
+        let (text, offsets) = normalize_with_offsets(&raw, &raw_offsets);
         if text.is_empty() {
             return;
         }
-
-        let (kind, text) = if let Some(prefix) = context.prefix {
-            (BlockKind::ListItem, format!("{prefix}{text}"))
-        } else if context.quote {
-            (BlockKind::Quote, text)
-        } else {
-            (BlockKind::Paragraph, text)
+        let (offsets, text) = match context.prefix {
+            Some(prefix) => {
+                let first = offsets.first().copied().unwrap_or(0);
+                let mut prefixed = String::with_capacity(text.len() + 2);
+                prefixed.push_str(prefix);
+                prefixed.push_str(&text);
+                let mut prefixed_offsets = vec![first; prefix.chars().count()];
+                prefixed_offsets.extend(offsets);
+                (prefixed_offsets, prefixed)
+            }
+            None => (offsets, text),
         };
-        self.push_block(Block { kind, text }, context.source);
+        let kind = if context.prefix.is_some() {
+            BlockKind::ListItem
+        } else if context.quote {
+            BlockKind::Quote
+        } else {
+            BlockKind::Paragraph
+        };
+        self.push_block(Block { kind, text }, context.source, offsets);
     }
 }
 
@@ -584,6 +747,38 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Collapse whitespace like [`normalize`] and keep a source offset per
+/// resulting character.
+fn normalize_with_offsets(
+    text: &str,
+    offsets: &[usize],
+) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(text.len());
+    let mut out_offsets = Vec::with_capacity(text.len());
+    let mut pending_space = None;
+    for (index, ch) in text.chars().enumerate() {
+        let offset = offsets.get(index).copied().unwrap_or(0);
+        if ch.is_whitespace() {
+            if !out.is_empty() && pending_space.is_none() {
+                pending_space = Some(offset);
+            }
+        } else {
+            if let Some(space) = pending_space.take() {
+                out.push(' ');
+                out_offsets.push(space);
+            }
+            out.push(ch);
+            out_offsets.push(offset);
+        }
+    }
+    (out, out_offsets)
+}
+
+fn normalize_and_index(text: &str) -> (String, Vec<usize>) {
+    let offsets: Vec<usize> = (0..text.chars().count()).collect();
+    normalize_with_offsets(text, &offsets)
+}
+
 fn is_block(name: &str) -> bool {
     matches!(
         name,
@@ -617,6 +812,50 @@ fn is_block(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wraps_with_character_ranges() {
+        let lines = wrap_block("one two three four", 9, "", "");
+        let texts: Vec<&str> = lines.iter().map(|l| l.2.as_str()).collect();
+        assert_eq!(texts, vec!["one two", "three", "four"]);
+        assert_eq!(lines[0].0..lines[0].1, 0..7);
+        assert_eq!(lines[1].0..lines[1].1, 8..13);
+        assert_eq!(lines[2].0..lines[2].1, 14..18);
+        // Every reported range matches the block text.
+        let text = "one two three four";
+        let chars: Vec<char> = text.chars().collect();
+        for (start, end, _, _) in &lines {
+            let slice: String = chars[*start..*end].iter().collect();
+            assert!(!slice.trim().is_empty());
+        }
+
+        let indented = wrap_block("alpha beta gamma", 8, "│ ", "│ ");
+        assert_eq!(indented[0].2, "│ alpha");
+        assert_eq!(indented[0].3, 2);
+        assert!(indented.iter().all(|line| line.2.width() <= 8));
+    }
+
+    #[test]
+    fn maps_block_characters_to_source_offsets() {
+        let article = parse_article(
+            "<section><p>\n  Hello <strong>world</strong>!\n</p></section>",
+        );
+        let block = article
+            .blocks
+            .iter()
+            .position(|block| block.text == "Hello world!")
+            .unwrap();
+        let source = article.sources[block].as_ref().unwrap();
+        assert_eq!(source.path, "section[1]/p[1]");
+        assert_eq!(source.offsets.len(), "Hello world!".len());
+        // "world" starts after the leading whitespace and "Hello ".
+        let start = source.offsets[6];
+        let end = source.offsets[10] + 1;
+        let raw = "\n  Hello world!\n";
+        let chars: Vec<char> = raw.chars().collect();
+        let selected: String = chars[start..end].iter().collect();
+        assert_eq!(selected, "world");
+    }
 
     #[test]
     fn records_annotation_sources() {

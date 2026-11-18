@@ -170,6 +170,8 @@ mod tests {
                 kind: Some(BlockKind::Paragraph),
                 image: None,
                 block: None,
+                range: None,
+                indent: 0,
             })
             .collect()
     }

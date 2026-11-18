@@ -365,7 +365,7 @@ fn draw_annotations(
                 .add_modifier(Modifier::BOLD),
         )))
         .title_bottom(Line::from(Span::styled(
-            " n new · e note · c color · d delete · Enter go · Esc close ",
+            " n select text · e note · c color · d delete · Enter go · Esc close ",
             Style::new().fg(theme::faint()),
         )));
     let inner = block.inner(popup);
@@ -375,7 +375,7 @@ fn draw_annotations(
         let y = inner.y + inner.height / 2;
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "No annotations yet — press n to annotate this paragraph",
+                "No annotations yet — press n and select text",
                 Style::new().fg(theme::dim()),
             )))
             .alignment(Alignment::Center),

@@ -139,6 +139,22 @@ pub struct Reader {
     pub speed: Option<SpeedReader>,
     /// Highlights on the article.
     pub annotations: Vec<Annotation>,
+    /// Text selection in progress.
+    pub selection: Option<Selection>,
+}
+
+/// Position in the rendered article text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextPos {
+    pub line: usize,
+    /// Character offset within the line's content.
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    pub cursor: TextPos,
+    pub anchor: Option<TextPos>,
 }
 
 impl Reader {
@@ -170,6 +186,7 @@ impl Reader {
             search_query: None,
             speed: None,
             annotations: Vec::new(),
+            selection: None,
         }
     }
 
@@ -178,6 +195,7 @@ impl Reader {
         self.loading = false;
         self.error = None;
         self.speed = None;
+        self.selection = None;
         self.images.clear();
         self.image_errors.clear();
         self.requested_images.clear();
@@ -214,6 +232,7 @@ impl Reader {
     }
 
     fn invalidate_layout(&mut self) {
+        self.selection = None;
         let ratio = self.position_ratio();
         let width = self.effective_width(self.width.max(60));
         self.width = width;
@@ -256,6 +275,7 @@ impl Reader {
         if width == self.width && !self.lines.is_empty() {
             return;
         }
+        self.selection = None;
         let ratio = self.position_ratio();
         self.width = width;
         self.lines = if self.show_images
@@ -357,12 +377,158 @@ impl Reader {
             .map(SpeedReader::next_due)
     }
 
-    /// Block index at the top of the viewport.
-    pub fn block_at_scroll(&self) -> Option<usize> {
+    fn selectable_line(&self, line: usize) -> bool {
         self.lines
-            .iter()
-            .skip(self.scroll)
-            .find_map(|line| line.block)
+            .get(line)
+            .is_some_and(|line| line.range.is_some() && line.block.is_some())
+    }
+
+    fn line_len(&self, line: usize) -> usize {
+        self.lines
+            .get(line)
+            .and_then(|line| line.range.as_ref())
+            .map(|range| range.end - range.start)
+            .unwrap_or(0)
+    }
+
+    /// Start selecting text at the top of the viewport.
+    pub fn start_selection(&mut self) {
+        let Some(line) = (self.scroll..self.lines.len())
+            .find(|&index| self.selectable_line(index))
+        else {
+            return;
+        };
+        self.selection = Some(Selection {
+            cursor: TextPos { line, offset: 0 },
+            anchor: None,
+        });
+        self.ensure_selection_visible();
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let line = selection.cursor.line;
+        let viewport = self.viewport.max(1);
+        if line < self.scroll {
+            self.scroll = line;
+        } else if line >= self.scroll + viewport {
+            self.scroll = line + 1 - viewport;
+        }
+        let max = self.max_scroll();
+        self.scroll = self.scroll.min(max);
+    }
+
+    pub fn selection_left(&mut self) {
+        let Some(mut selection) = self.selection else {
+            return;
+        };
+        if selection.cursor.offset > 0 {
+            selection.cursor.offset -= 1;
+        } else if let Some(line) = (0..selection.cursor.line)
+            .rev()
+            .find(|&i| self.selectable_line(i))
+        {
+            selection.cursor = TextPos {
+                line,
+                offset: self.line_len(line),
+            };
+        }
+        self.selection = Some(selection);
+        self.ensure_selection_visible();
+    }
+
+    pub fn selection_right(&mut self) {
+        let Some(mut selection) = self.selection else {
+            return;
+        };
+        let len = self.line_len(selection.cursor.line);
+        if selection.cursor.offset < len {
+            selection.cursor.offset += 1;
+        } else if let Some(line) = (selection.cursor.line + 1..self.lines.len())
+            .find(|&i| self.selectable_line(i))
+        {
+            selection.cursor = TextPos { line, offset: 0 };
+        }
+        self.selection = Some(selection);
+        self.ensure_selection_visible();
+    }
+
+    pub fn selection_move(&mut self, delta: isize) {
+        let Some(mut selection) = self.selection else {
+            return;
+        };
+        let mut line = selection.cursor.line;
+        for _ in 0..delta.unsigned_abs() {
+            let next = if delta >= 0 {
+                (line + 1..self.lines.len()).find(|&i| self.selectable_line(i))
+            } else {
+                (0..line).rev().find(|&i| self.selectable_line(i))
+            };
+            match next {
+                Some(next) => line = next,
+                None => break,
+            }
+        }
+        let offset = selection.cursor.offset.min(self.line_len(line));
+        selection.cursor = TextPos { line, offset };
+        self.selection = Some(selection);
+        self.ensure_selection_visible();
+    }
+
+    /// Block character for a text position.
+    fn block_char(&self, pos: TextPos) -> Option<(usize, usize)> {
+        let line = self.lines.get(pos.line)?;
+        let range = line.range.as_ref()?;
+        let offset = pos.offset.min(range.end - range.start);
+        Some((line.block?, range.start + offset))
+    }
+
+    /// Ordered selection bounds.
+    pub fn selected_bounds(&self) -> Option<(TextPos, TextPos)> {
+        let selection = self.selection?;
+        let anchor = selection.anchor?;
+        Some(if selection.cursor < anchor {
+            (selection.cursor, anchor)
+        } else {
+            (anchor, selection.cursor)
+        })
+    }
+
+    /// Readeck selectors and offsets for the current selection.
+    pub fn annotation_selection(
+        &self,
+    ) -> Option<(String, usize, String, usize)> {
+        let (start, end) = self.selected_bounds()?;
+        if start == end {
+            return None;
+        }
+        let article = self.article.as_ref()?;
+        let (start_block, start_char) = self.block_char(start)?;
+        let (end_block, end_char) = self.block_char(end)?;
+        let start_source = article.sources.get(start_block)?.as_ref()?;
+        let end_source = article.sources.get(end_block)?.as_ref()?;
+        let start_offset = start_source
+            .offsets
+            .get(start_char)
+            .copied()
+            .unwrap_or_else(|| {
+                start_source.offsets.last().copied().unwrap_or(0)
+            });
+        let end_offset = match end_source.offsets.get(end_char) {
+            Some(offset) => *offset,
+            None => end_source.len,
+        };
+        if start_offset >= end_offset {
+            return None;
+        }
+        Some((
+            start_source.path.clone(),
+            start_offset,
+            end_source.path.clone(),
+            end_offset,
+        ))
     }
 
     /// Scroll to the first line of a block.
@@ -467,8 +633,6 @@ pub enum Modal {
 #[derive(Debug)]
 pub struct AnnotationsModal {
     pub bookmark_id: String,
-    /// Block the reader was on when the modal opened.
-    pub block: Option<usize>,
     pub selected: usize,
 }
 
@@ -939,10 +1103,10 @@ impl App {
                             annotations.selected.saturating_sub(1);
                     }
                     KeyCode::Char('n') => {
-                        self.create_annotation(
-                            &annotations.bookmark_id,
-                            annotations.block,
-                        );
+                        if let Some(reader) = &mut self.reader {
+                            reader.start_selection();
+                        }
+                        reopen = false;
                     }
                     KeyCode::Char('e') => {
                         if let Some(annotation) = list.get(annotations.selected)
@@ -1458,6 +1622,14 @@ impl App {
     }
 
     fn handle_reader_key(&mut self, key: KeyEvent) {
+        if self
+            .reader
+            .as_ref()
+            .is_some_and(|reader| reader.selection.is_some())
+        {
+            self.handle_selection_key(key);
+            return;
+        }
         if self.reader.as_ref().is_some_and(Reader::speed_reading) {
             self.handle_speed_read_key(key);
             return;
@@ -1856,51 +2028,10 @@ impl App {
             return;
         };
         let bookmark_id = reader.bookmark.id.clone();
-        let block = reader.block_at_scroll();
         self.modal = Some(Modal::Annotations(AnnotationsModal {
             bookmark_id,
-            block,
             selected: 0,
         }));
-    }
-
-    fn create_annotation(&mut self, bookmark_id: &str, block: Option<usize>) {
-        if self.offline_mode || self.offline {
-            self.toast_error("Annotations require a connection to Readeck");
-            return;
-        }
-        let source = self
-            .reader
-            .as_ref()
-            .and_then(|reader| reader.article.as_ref())
-            .and_then(|article| {
-                block.and_then(|block| article.sources.get(block))
-            })
-            .and_then(|source| source.clone());
-        let Some(source) = source else {
-            self.toast_error("This paragraph cannot be annotated");
-            return;
-        };
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        let bookmark_id = bookmark_id.to_string();
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let result = client
-                .create_annotation(
-                    &bookmark_id,
-                    (&source.path, 0),
-                    (&source.path, source.len),
-                    "yellow",
-                    "",
-                )
-                .await;
-            let _ = tx.send(Event::api(ApiEvent::AnnotationCreated {
-                bookmark_id,
-                result,
-            }));
-        });
     }
 
     fn update_annotation(
@@ -2123,6 +2254,110 @@ impl App {
         if let Some(reader) = &mut self.reader {
             reader.scroll_by(delta);
         }
+    }
+
+    fn handle_selection_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection = None;
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_left();
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_right();
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_move(1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection_move(-1);
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => self.selection_press(),
+            _ => {}
+        }
+    }
+
+    fn selection_press(&mut self) {
+        let (range, bookmark_id, started) = {
+            let Some(reader) = &mut self.reader else {
+                return;
+            };
+            let Some(mut selection) = reader.selection else {
+                return;
+            };
+            if selection.anchor.is_none() {
+                selection.anchor = Some(selection.cursor);
+                reader.selection = Some(selection);
+                (None, String::new(), true)
+            } else {
+                let range = reader.annotation_selection();
+                let bookmark_id = reader.bookmark.id.clone();
+                reader.selection = None;
+                (range, bookmark_id, false)
+            }
+        };
+        if started {
+            self.toast_info(
+                "Select text with h/j/k/l, then press Enter to annotate",
+            );
+            return;
+        }
+        match range {
+            Some((start_selector, start_offset, end_selector, end_offset)) => {
+                self.create_annotation_span(
+                    &bookmark_id,
+                    (start_selector, start_offset),
+                    (end_selector, end_offset),
+                );
+            }
+            None => self.toast_error("Select at least one character"),
+        }
+    }
+
+    fn create_annotation_span(
+        &mut self,
+        bookmark_id: &str,
+        start: (String, usize),
+        end: (String, usize),
+    ) {
+        if self.offline_mode || self.offline {
+            self.toast_error("Annotations require a connection to Readeck");
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let bookmark_id = bookmark_id.to_string();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .create_annotation(
+                    &bookmark_id,
+                    (&start.0, start.1),
+                    (&end.0, end.1),
+                    "yellow",
+                    "",
+                )
+                .await;
+            let _ = tx.send(Event::api(ApiEvent::AnnotationCreated {
+                bookmark_id,
+                result,
+            }));
+        });
     }
 
     fn handle_speed_read_key(&mut self, key: KeyEvent) {
@@ -4548,6 +4783,105 @@ mod tests {
     }
 
     #[test]
+    fn selection_maps_to_article_offsets() {
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.set_article(parse_article("<p>alpha beta</p><p>second</p>"));
+        reader.start_selection();
+        let first = reader.selection.unwrap().cursor;
+        assert_eq!(first, TextPos { line: 0, offset: 0 });
+
+        for _ in 0..5 {
+            reader.selection_right();
+        }
+        reader.selection.as_mut().unwrap().anchor = Some(first);
+        assert_eq!(
+            reader.annotation_selection(),
+            Some(("p[1]".into(), 0, "p[1]".into(), 5))
+        );
+
+        // Extending into the next block uses both selectors.
+        reader.selection.as_mut().unwrap().cursor =
+            TextPos { line: 2, offset: 3 };
+        assert_eq!(
+            reader.annotation_selection(),
+            Some(("p[1]".into(), 0, "p[2]".into(), 3))
+        );
+
+        // Left at the start of a line moves to the previous line's end.
+        reader.selection.as_mut().unwrap().cursor =
+            TextPos { line: 2, offset: 0 };
+        reader.selection_left();
+        assert_eq!(reader.selection.unwrap().cursor.line, 0);
+        assert_eq!(reader.selection.unwrap().cursor.offset, 10);
+    }
+
+    #[test]
+    fn selected_text_is_highlighted() {
+        use ratatui::Terminal;
+        use ratatui::backend::{Backend, TestBackend};
+
+        let mut app = test_app_with_bookmarks(1);
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                title: Some("Article".into()),
+                has_article: true,
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.set_article(parse_article("<p>alpha beta</p>"));
+        app.reader = Some(reader);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+
+        {
+            let reader = app.reader.as_mut().unwrap();
+            reader.start_selection();
+            let anchor = reader.selection.unwrap().cursor;
+            for _ in 0..5 {
+                reader.selection_right();
+            }
+            reader.selection.as_mut().unwrap().anchor = Some(anchor);
+        }
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let selected = crate::ui::theme::bg_selected();
+        let mut checked = false;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width.saturating_sub(5) {
+                let word: String =
+                    (x..x + 5).map(|x| buffer[(x, y)].symbol()).collect();
+                if word == "alpha" {
+                    for position in x..x + 5 {
+                        assert_eq!(buffer[(position, y)].bg, selected);
+                    }
+                    checked = true;
+                }
+            }
+        }
+        assert!(checked, "article text was not rendered");
+
+        let position = terminal.backend_mut().get_cursor_position().unwrap();
+        assert_eq!((position.x, position.y), (7, 4));
+    }
+
+    #[test]
     fn offline_reader_uses_cached_annotations() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut cache = Cache::new(
@@ -4603,7 +4937,7 @@ mod tests {
         let block = reader.annotation_block(&reader.annotations[0]).unwrap();
         assert_eq!(reader.lines[0].block, Some(0));
         assert!(reader.jump_to_block(block));
-        assert_eq!(reader.block_at_scroll(), Some(1));
+        assert_eq!(reader.lines[reader.scroll].block, Some(1));
         assert_eq!(reader.annotation_block(&reader.annotations[0]), Some(1));
     }
 
@@ -4653,7 +4987,7 @@ mod tests {
     }
 
     #[test]
-    fn annotations_modal_opens_on_the_current_block() {
+    fn annotations_modal_opens() {
         let mut app = test_app_with_bookmarks(1);
         let mut reader = Reader::new(
             Bookmark {
@@ -4671,7 +5005,6 @@ mod tests {
         match app.modal.as_ref().unwrap() {
             Modal::Annotations(modal) => {
                 assert_eq!(modal.bookmark_id, "b1");
-                assert_eq!(modal.block, Some(0));
             }
             _ => panic!("expected the annotations modal"),
         }
