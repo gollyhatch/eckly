@@ -106,7 +106,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         crate::app::Focus::List => {
             if app.filter == crate::models::Filter::Highlights {
-                "  j/k move · Enter open highlight · PgUp/PgDn page · r refresh · Tab filters · ? help"
+                "  j/k move · Enter open · D delete highlight · PgUp/PgDn page · r refresh · Tab filters · ? help"
             } else {
                 "  j/k move · Space select · Enter read · m read · f favorite · a archive · t labels · / search · n add · Tab filters · ? help"
             }

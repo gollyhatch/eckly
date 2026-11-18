@@ -1932,6 +1932,7 @@ impl App {
                 KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
                     self.open_selected_highlight()
                 }
+                KeyCode::Char('D') => self.delete_selected_highlight(),
                 KeyCode::Char('r') => self.refresh_all(),
                 _ => {}
             }
@@ -2392,6 +2393,51 @@ impl App {
             return;
         }
         self.open_bookmark(bookmark, Some(annotation.id));
+    }
+
+    fn delete_selected_highlight(&mut self) {
+        let Some(annotation) = self
+            .list_state
+            .selected()
+            .and_then(|index| self.highlights.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        if annotation.bookmark_id.is_empty() {
+            self.toast_error("This highlight has no bookmark");
+            return;
+        }
+        self.delete_annotation(annotation.bookmark_id, annotation.id);
+    }
+
+    fn remove_annotation_summary(&mut self, bookmark_id: &str, id: &str) {
+        let Some(map) = &mut self.annotation_summaries else {
+            return;
+        };
+        let Some(annotations) = map.get_mut(bookmark_id) else {
+            return;
+        };
+        annotations.retain(|annotation| annotation.id != id);
+        if annotations.is_empty() {
+            map.remove(bookmark_id);
+        }
+    }
+
+    fn remove_cached_annotation(&mut self, bookmark_id: &str, id: &str) {
+        let Some(cache) = &mut self.cache else {
+            return;
+        };
+        let Some(annotations) = cache.annotations_ref(bookmark_id).cloned()
+        else {
+            return;
+        };
+        let kept: Vec<Annotation> = annotations
+            .into_iter()
+            .filter(|annotation| annotation.id != id)
+            .collect();
+        cache.set_annotations(bookmark_id, kept);
+        let _ = cache.save();
     }
 
     fn bookmark_for_annotation(&self, annotation: &Annotation) -> Bookmark {
@@ -4308,8 +4354,20 @@ impl App {
                                 .retain(|annotation| annotation.id != id);
                         }
                     }
+                    self.remove_annotation_summary(&bookmark_id, &id);
+                    self.remove_cached_annotation(&bookmark_id, &id);
                     self.store_reader_annotations();
                     self.store_annotation_summaries();
+                    if self.filter == Filter::Highlights {
+                        self.rebuild_highlights();
+                        self.total = self.highlights.len();
+                        let index = self.list_state.selected().unwrap_or(0);
+                        self.list_state.select(
+                            (!self.highlights.is_empty()).then_some(
+                                index.min(self.highlights.len() - 1),
+                            ),
+                        );
+                    }
                     self.toast_success("Annotation deleted");
                 }
                 Err(err) => {
@@ -5900,6 +5958,47 @@ mod tests {
         assert!(reader.error.is_none());
         assert!(!reader.lines.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_a_highlight_updates_the_view() {
+        let mut app = test_app_with_bookmarks(1);
+        app.filter = Filter::Highlights;
+        app.annotation_summaries = Some(HashMap::from([(
+            "b1".to_string(),
+            vec![
+                Annotation {
+                    id: "a1".into(),
+                    bookmark_id: "b1".into(),
+                    bookmark_title: "The article".into(),
+                    text: "one".into(),
+                    ..Default::default()
+                },
+                Annotation {
+                    id: "a2".into(),
+                    bookmark_id: "b1".into(),
+                    bookmark_title: "The article".into(),
+                    text: "two".into(),
+                    ..Default::default()
+                },
+            ],
+        )]));
+        app.rebuild_highlights();
+        assert_eq!(app.highlights.len(), 2);
+        app.list_state.select(Some(0));
+
+        app.handle_event(Event::api(ApiEvent::AnnotationDeleted {
+            bookmark_id: "b1".into(),
+            id: "a1".into(),
+            result: Ok(()),
+        }));
+
+        assert_eq!(app.highlights.len(), 1);
+        assert_eq!(app.highlights[0].id, "a2");
+        assert_eq!(app.list_state.selected(), Some(0));
+        let summaries = app.annotation_summaries.as_ref().unwrap();
+        assert_eq!(summaries["b1"].len(), 1);
+        assert_eq!(summaries["b1"][0].id, "a2");
     }
 
     #[test]

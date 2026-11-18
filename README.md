@@ -338,11 +338,12 @@ its color, and a highlight with a note shows it inline as `[note]`. In the
 bookmark list, each highlight is listed under its bookmark and the metadata line
 shows how many highlights the bookmark has. The Library pane has a
 **Highlights** view below **All Bookmarks** that lists every highlight in the
-library; press `Enter` on one to read its bookmark at that highlight. `v` starts
-a text selection directly; `H` opens the annotation list, where `n` starts one
-too, `e` edits the note, `c` cycles the color (`yellow`, `red`, `green`, `blue`,
-`purple`), `d` deletes it and `Enter` jumps to it. Annotations made in Readeck's
-web UI are shown on the paragraph that contains them.
+library; press `Enter` on one to read its bookmark at that highlight, or `D` to
+delete the highlight. `v` starts a text selection directly; `H` opens the
+annotation list, where `n` starts one too, `e` edits the note, `c` cycles the
+color (`yellow`, `red`, `green`, `blue`, `purple`), `d` deletes it and `Enter`
+jumps to it. Annotations made in Readeck's web UI are shown on the paragraph
+that contains them.
 
 In selection mode, move the cursor with `h`/`j`/`k`/`l`, jump by word with
 `w`/`b`/`e` (or `W`/`B`/`E` for whitespace-delimited words), jump to the start

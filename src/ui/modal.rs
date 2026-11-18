@@ -89,6 +89,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             "a/f/t/m/D apply to selected items.",
             Style::new().fg(theme::dim()),
         )),
+        Line::from(Span::styled(
+            "In Highlights, D deletes the highlight.",
+            Style::new().fg(theme::dim()),
+        )),
     ];
 
     let right = vec![
