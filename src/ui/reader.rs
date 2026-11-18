@@ -193,15 +193,38 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else if let Some(speed) = &reader.speed {
             draw_speed(frame, inner, speed, content_width as usize);
         } else {
-            let mut annotated_blocks = std::collections::HashMap::new();
+            let mut annotated: std::collections::HashMap<
+                usize,
+                Vec<(usize, usize, ratatui::style::Color)>,
+            > = std::collections::HashMap::new();
             for annotation in &reader.annotations {
-                if let Some(block) = reader.annotation_block(annotation) {
-                    annotated_blocks.entry(block).or_insert_with(|| {
-                        super::annotation_color(annotation.color())
-                    });
+                let color = super::annotation_color(annotation.color());
+                match reader.annotation_ranges(annotation) {
+                    Some(ranges) => {
+                        for (block, from, to) in ranges {
+                            annotated
+                                .entry(block)
+                                .or_default()
+                                .push((from, to, color));
+                        }
+                    }
+                    None => {
+                        if let Some(block) = reader.annotation_block(annotation)
+                        {
+                            annotated.entry(block).or_default().push((
+                                0,
+                                usize::MAX,
+                                color,
+                            ));
+                        }
+                    }
                 }
             }
             let bounds = reader.selected_bounds();
+            let selection_style = Style::new()
+                .bg(theme::bg_selected())
+                .fg(theme::text())
+                .add_modifier(Modifier::BOLD);
             let visible: Vec<Line> = reader
                 .lines
                 .iter()
@@ -212,23 +235,39 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     if let Some(cells) = &line.image {
                         return image_line(cells, content_width as usize);
                     }
-                    let mut base = block_style(line.kind);
-                    if let Some(color) = line
-                        .block
-                        .and_then(|block| annotated_blocks.get(&block))
+                    let base = block_style(line.kind);
+                    let mut styles = Vec::new();
+                    if let (Some(range), Some(block)) =
+                        (&line.range, line.block)
                     {
-                        base = base.fg(*color);
+                        if let Some(ranges) = annotated.get(&block) {
+                            for (from, to, color) in ranges {
+                                let start = (*from).max(range.start);
+                                let end = (*to).min(range.end);
+                                if start < end {
+                                    styles.push((
+                                        start - range.start,
+                                        end - range.start,
+                                        Style::new().fg(*color),
+                                    ));
+                                }
+                            }
+                        }
                     }
                     if let Some((from, to)) =
                         selection_span(bounds, index, line)
                     {
-                        return selection_line(line, base, from, to);
+                        styles.push((from, to, selection_style));
                     }
-                    article_line(
-                        &line.text,
-                        base,
-                        reader.search_query.as_deref(),
-                    )
+                    if styles.is_empty() {
+                        article_line(
+                            &line.text,
+                            base,
+                            reader.search_query.as_deref(),
+                        )
+                    } else {
+                        styled_line(line, base, &styles)
+                    }
                 })
                 .collect();
             frame.render_widget(Paragraph::new(visible), content_area);
@@ -498,45 +537,44 @@ fn selection_span(
     Some((from, to))
 }
 
-fn selection_line(
+fn styled_line(
     wrapped: &crate::article::WrappedLine,
     base: Style,
-    from: usize,
-    to: usize,
+    ranges: &[(usize, usize, Style)],
 ) -> Line<'static> {
     let indent = indent_chars(&wrapped.text, wrapped.indent);
     let chars: Vec<char> = wrapped.text.chars().collect();
+    let content = &chars[indent.min(chars.len())..];
+    let mut boundaries = vec![0usize, content.len()];
+    for (from, to, _) in ranges {
+        boundaries.push((*from).min(content.len()));
+        boundaries.push((*to).min(content.len()));
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
     let mut spans = Vec::new();
-    if indent > 0 {
+    if indent > 0 && indent <= chars.len() {
         spans.push(Span::styled(
             chars[..indent].iter().collect::<String>(),
             base,
         ));
     }
-    let content = &chars[indent..];
-    let selected = Style::new()
-        .bg(theme::bg_selected())
-        .fg(theme::text())
-        .add_modifier(Modifier::BOLD);
-    if from > 0 {
+    for pair in boundaries.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        if start >= end {
+            continue;
+        }
+        let mut style = base;
+        for (from, to, range_style) in ranges {
+            if *from <= start && *to >= end {
+                style = *range_style;
+            }
+        }
         spans.push(Span::styled(
-            content[..from.min(content.len())]
-                .iter()
-                .collect::<String>(),
-            base,
+            content[start..end].iter().collect::<String>(),
+            style,
         ));
-    }
-    let from = from.min(content.len());
-    let to = to.min(content.len());
-    if to > from {
-        spans.push(Span::styled(
-            content[from..to].iter().collect::<String>(),
-            selected,
-        ));
-    }
-    if to < content.len() {
-        spans
-            .push(Span::styled(content[to..].iter().collect::<String>(), base));
     }
     Line::from(spans)
 }

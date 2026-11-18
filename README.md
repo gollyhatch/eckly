@@ -332,8 +332,8 @@ word and pause, `+` / `-` change the pace by 25 words per minute, and `s` or
 
 ### Annotations
 
-Highlights from Readeck are shown in the reader: paragraphs covered by an
-annotation are drawn in its color. `H` opens the annotation list, where `n`
+Highlights from Readeck are shown in the reader: the annotated text is drawn in
+its color. `H` opens the annotation list, where `n`
 starts a text selection, `e` edits the note, `c` cycles the color (`yellow`,
 `red`, `green`, `blue`, `purple`), `d` deletes it and `Enter` jumps to it.
 Annotations made in Readeck's web UI are shown on the paragraph that contains

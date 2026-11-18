@@ -520,7 +520,7 @@ impl Reader {
             Some(offset) => *offset,
             None => end_source.len,
         };
-        if start_offset >= end_offset {
+        if start_source.path == end_source.path && start_offset >= end_offset {
             return None;
         }
         Some((
@@ -539,6 +539,80 @@ impl Reader {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Character ranges an annotation covers, by block.
+    ///
+    /// Returns `None` when the annotation targets an element nested inside a
+    /// block; callers then fall back to tinting the whole block.
+    pub fn annotation_ranges(
+        &self,
+        annotation: &Annotation,
+    ) -> Option<Vec<(usize, usize, usize)>> {
+        let article = self.article.as_ref()?;
+        let start_index = article.sources.iter().position(|source| {
+            source
+                .as_ref()
+                .is_some_and(|source| source.path == annotation.start_selector)
+        })?;
+        let start_source = article.sources[start_index].as_ref()?;
+        let start_char = start_source
+            .offsets
+            .iter()
+            .position(|offset| *offset >= annotation.start_offset)
+            .unwrap_or(start_source.offsets.len());
+        let end_index = article
+            .sources
+            .iter()
+            .position(|source| {
+                source.as_ref().is_some_and(|source| {
+                    source.path == annotation.end_selector
+                })
+            })
+            .unwrap_or(start_index);
+        let end_source = article.sources[end_index].as_ref()?;
+        let end_char = end_source
+            .offsets
+            .iter()
+            .position(|offset| *offset >= annotation.end_offset)
+            .unwrap_or(end_source.offsets.len());
+
+        if start_index == end_index {
+            if start_char >= end_char {
+                return None;
+            }
+            return Some(vec![(start_index, start_char, end_char)]);
+        }
+
+        let (first, first_from, last, last_to) = if start_index < end_index {
+            (start_index, start_char, end_index, end_char)
+        } else {
+            (end_index, end_char, start_index, start_char)
+        };
+        let mut ranges = Vec::new();
+        for block in first..=last {
+            let length = article
+                .sources
+                .get(block)
+                .and_then(|source| source.as_ref())
+                .map(|source| source.offsets.len())
+                .unwrap_or(0);
+            let (from, to) = if block == first {
+                (first_from, length)
+            } else if block == last {
+                (0, last_to)
+            } else {
+                (0, length)
+            };
+            if from < to {
+                ranges.push((block, from, to));
+            }
+        }
+        if ranges.is_empty() {
+            None
+        } else {
+            Some(ranges)
         }
     }
 
@@ -4962,6 +5036,9 @@ mod tests {
         reader.annotations = vec![Annotation {
             id: "a1".into(),
             start_selector: "p[1]".into(),
+            start_offset: 0,
+            end_selector: "p[1]".into(),
+            end_offset: 5,
             color: "red".into(),
             ..Default::default()
         }];
