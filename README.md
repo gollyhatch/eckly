@@ -333,16 +333,17 @@ word and pause, `+` / `-` change the pace by 25 words per minute, and `s` or
 ### Annotations
 
 Highlights from Readeck are shown in the reader: the annotated text is drawn in
-its color. `H` opens the annotation list, where `n`
-starts a text selection, `e` edits the note, `c` cycles the color (`yellow`,
-`red`, `green`, `blue`, `purple`), `d` deletes it and `Enter` jumps to it.
-Annotations made in Readeck's web UI are shown on the paragraph that contains
-them.
+its color, and a highlight with a note shows it inline as `[note]`. `H` opens
+the annotation list, where `n` starts a text selection, `e` edits the note, `c`
+cycles the color (`yellow`, `red`, `green`, `blue`, `purple`), `d` deletes it
+and `Enter` jumps to it. Annotations made in Readeck's web UI are shown on the
+paragraph that contains them.
 
 In selection mode, move the cursor with `h`/`j`/`k`/`l`, `Enter` or `Space` to
 set the start of the selection and again to finish it. The selected text is
 highlighted as you move, and finishing creates a yellow highlight that you can
-give a note or another color from the list. `Esc` cancels the selection.
+give a note or another color from the list. Inline notes are hidden while
+selecting so they cannot end up in a selection. `Esc` cancels the selection.
 `eckly sync` downloads annotations too, so highlights stay visible offline;
 adding or editing them needs a connection to Readeck.
 

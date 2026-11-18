@@ -5064,6 +5064,77 @@ mod tests {
     }
 
     #[test]
+    fn annotation_notes_are_shown_inline_unless_selecting() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app_with_bookmarks(1);
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                title: Some("Article".into()),
+                has_article: true,
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.set_article(parse_article("<p>alpha beta</p>"));
+        reader.annotations = vec![Annotation {
+            id: "a1".into(),
+            start_selector: "p[1]".into(),
+            start_offset: 0,
+            end_selector: "p[1]".into(),
+            end_offset: 5,
+            color: "red".into(),
+            note: "my note".into(),
+            ..Default::default()
+        }];
+        app.reader = Some(reader);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let expected = crate::ui::theme::dim();
+        let mut checked = false;
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if let Some(index) = row.find("alpha [my note] beta") {
+                let note = index + "alpha ".len();
+                assert_eq!(buffer[(note as u16, y)].fg, expected);
+                checked = true;
+            }
+        }
+        assert!(checked, "inline note was not rendered");
+
+        // Selection mode hides inline notes.
+        {
+            let reader = app.reader.as_mut().unwrap();
+            reader.start_selection();
+            let anchor = reader.selection.unwrap().cursor;
+            for _ in 0..3 {
+                reader.selection_right();
+            }
+            reader.selection.as_mut().unwrap().anchor = Some(anchor);
+        }
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            assert!(!row.contains("[my note]"));
+        }
+    }
+
+    #[test]
     fn annotations_modal_opens() {
         let mut app = test_app_with_bookmarks(1);
         let mut reader = Reader::new(

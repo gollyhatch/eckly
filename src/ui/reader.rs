@@ -220,6 +220,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     }
                 }
             }
+            let mut inline_notes: Vec<(usize, usize, String)> = Vec::new();
+            if !selecting {
+                for annotation in &reader.annotations {
+                    let note = annotation.note.trim();
+                    if note.is_empty() {
+                        continue;
+                    }
+                    let text = format!(
+                        " [{}]",
+                        super::truncate_width(&note.replace('\n', " "), 40)
+                    );
+                    match reader.annotation_ranges(annotation) {
+                        Some(ranges) => {
+                            if let Some((block, _, end)) = ranges.last() {
+                                inline_notes.push((*block, *end, text));
+                            }
+                        }
+                        None => {
+                            if let Some(block) =
+                                reader.annotation_block(annotation)
+                            {
+                                inline_notes.push((block, usize::MAX, text));
+                            }
+                        }
+                    }
+                }
+            }
             let bounds = reader.selected_bounds();
             let selection_style = Style::new()
                 .bg(theme::bg_selected())
@@ -259,14 +286,39 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     {
                         styles.push((from, to, selection_style));
                     }
-                    if styles.is_empty() {
+                    let mut notes = Vec::new();
+                    if let (Some(range), Some(block)) =
+                        (&line.range, line.block)
+                    {
+                        let last_line = reader
+                            .lines
+                            .get(index + 1)
+                            .and_then(|next| next.block)
+                            != Some(block);
+                        for (note_block, end, text) in &inline_notes {
+                            if *note_block != block {
+                                continue;
+                            }
+                            if *end == usize::MAX {
+                                if last_line {
+                                    notes.push((
+                                        range.end - range.start,
+                                        text.clone(),
+                                    ));
+                                }
+                            } else if *end > range.start && *end <= range.end {
+                                notes.push((*end - range.start, text.clone()));
+                            }
+                        }
+                    }
+                    if styles.is_empty() && notes.is_empty() {
                         article_line(
                             &line.text,
                             base,
                             reader.search_query.as_deref(),
                         )
                     } else {
-                        styled_line(line, base, &styles)
+                        styled_line(line, base, &styles, &notes)
                     }
                 })
                 .collect();
@@ -541,14 +593,21 @@ fn styled_line(
     wrapped: &crate::article::WrappedLine,
     base: Style,
     ranges: &[(usize, usize, Style)],
+    notes: &[(usize, String)],
 ) -> Line<'static> {
     let indent = indent_chars(&wrapped.text, wrapped.indent);
     let chars: Vec<char> = wrapped.text.chars().collect();
     let content = &chars[indent.min(chars.len())..];
+    let note_style =
+        Style::new().fg(theme::dim()).add_modifier(Modifier::ITALIC);
+
     let mut boundaries = vec![0usize, content.len()];
     for (from, to, _) in ranges {
         boundaries.push((*from).min(content.len()));
         boundaries.push((*to).min(content.len()));
+    }
+    for (position, _) in notes {
+        boundaries.push((*position).min(content.len()));
     }
     boundaries.sort_unstable();
     boundaries.dedup();
@@ -560,21 +619,27 @@ fn styled_line(
             base,
         ));
     }
-    for pair in boundaries.windows(2) {
-        let (start, end) = (pair[0], pair[1]);
-        if start >= end {
-            continue;
+
+    let mut cursor = 0;
+    for boundary in boundaries {
+        if boundary > cursor {
+            let mut style = base;
+            for (from, to, range_style) in ranges {
+                if *from <= cursor && *to >= boundary {
+                    style = *range_style;
+                }
+            }
+            spans.push(Span::styled(
+                content[cursor..boundary].iter().collect::<String>(),
+                style,
+            ));
         }
-        let mut style = base;
-        for (from, to, range_style) in ranges {
-            if *from <= start && *to >= end {
-                style = *range_style;
+        cursor = boundary;
+        for (position, text) in notes {
+            if *position == boundary {
+                spans.push(Span::styled(text.clone(), note_style));
             }
         }
-        spans.push(Span::styled(
-            content[start..end].iter().collect::<String>(),
-            style,
-        ));
     }
     Line::from(spans)
 }
