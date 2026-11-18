@@ -189,13 +189,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else if let Some(speed) = &reader.speed {
             draw_speed(frame, inner, speed, content_width as usize);
         } else {
+            let mut annotated_blocks = std::collections::HashMap::new();
+            for annotation in &reader.annotations {
+                if let Some(block) = reader.annotation_block(annotation) {
+                    annotated_blocks.entry(block).or_insert_with(|| {
+                        super::annotation_color(annotation.color())
+                    });
+                }
+            }
             let visible: Vec<Line> = reader
                 .lines
                 .iter()
                 .skip(reader.scroll)
                 .take(reader.viewport)
                 .map(|line| {
-                    if let Some(cells) = &line.image {
+                    let mut rendered = if let Some(cells) = &line.image {
                         image_line(cells, content_width as usize)
                     } else {
                         article_line(
@@ -203,7 +211,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                             block_style(line.kind),
                             reader.search_query.as_deref(),
                         )
+                    };
+                    if let Some(color) = line
+                        .block
+                        .and_then(|block| annotated_blocks.get(&block))
+                        .copied()
+                    {
+                        for span in &mut rendered.spans {
+                            span.style = span.style.fg(color);
+                        }
                     }
+                    rendered
                 })
                 .collect();
             frame.render_widget(Paragraph::new(visible), content_area);
@@ -259,7 +277,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let hints = if speed_reading {
         "  Space pause/resume · h/l word · +/- words per minute · s or Esc back to article"
     } else {
-        "  j/k scroll · Space paragraph · Ctrl+d/u half · g/G top/bottom · s speed read · m read · f favorite · a archive · t labels · i images · o browser · Esc back"
+        "  j/k scroll · Space paragraph · Ctrl+d/u half · g/G top/bottom · H annotations · s speed read · m read · f favorite · a archive · t labels · i images · o browser · Esc back"
     };
     let top = if let Some(toast) = super::toast_line(app) {
         toast

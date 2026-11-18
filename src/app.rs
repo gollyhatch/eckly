@@ -16,8 +16,8 @@ use crate::config::{Config, normalize_server};
 use crate::event::{ApiEvent, Event, PendingSyncResult};
 use crate::input::TextInput;
 use crate::models::{
-    Bookmark, BookmarkPatch, BookmarkQuery, Collection, Filter, Label, Profile,
-    SearchQuery, Sort,
+    Annotation, Bookmark, BookmarkPatch, BookmarkQuery, Collection, Filter,
+    Label, Profile, SearchQuery, Sort,
 };
 use crate::speed::{MAX_WPM, MIN_WPM, SpeedReader, WPM_STEP};
 
@@ -137,6 +137,8 @@ pub struct Reader {
     pub search_query: Option<String>,
     /// Active speed reading session.
     pub speed: Option<SpeedReader>,
+    /// Highlights on the article.
+    pub annotations: Vec<Annotation>,
 }
 
 impl Reader {
@@ -167,6 +169,7 @@ impl Reader {
             center_text,
             search_query: None,
             speed: None,
+            annotations: Vec::new(),
         }
     }
 
@@ -354,6 +357,38 @@ impl Reader {
             .map(SpeedReader::next_due)
     }
 
+    /// Block index at the top of the viewport.
+    pub fn block_at_scroll(&self) -> Option<usize> {
+        self.lines
+            .iter()
+            .skip(self.scroll)
+            .find_map(|line| line.block)
+    }
+
+    /// Scroll to the first line of a block.
+    pub fn jump_to_block(&mut self, block: usize) -> bool {
+        match self.lines.iter().position(|line| line.block == Some(block)) {
+            Some(index) => {
+                self.jump_to(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Block index an annotation belongs to.
+    pub fn annotation_block(&self, annotation: &Annotation) -> Option<usize> {
+        let article = self.article.as_ref()?;
+        article.sources.iter().position(|source| {
+            source.as_ref().is_some_and(|source| {
+                annotation.start_selector == source.path
+                    || annotation
+                        .start_selector
+                        .starts_with(&format!("{}/", source.path))
+            })
+        })
+    }
+
     fn line_contains(text: &str, query: &str) -> bool {
         text.to_ascii_lowercase()
             .contains(&query.to_ascii_lowercase())
@@ -426,6 +461,15 @@ pub enum Modal {
     Confirm(ConfirmModal),
     Input(InputModal),
     ThemePicker(ThemePicker),
+    Annotations(AnnotationsModal),
+}
+
+#[derive(Debug)]
+pub struct AnnotationsModal {
+    pub bookmark_id: String,
+    /// Block the reader was on when the modal opened.
+    pub block: Option<usize>,
+    pub selected: usize,
 }
 
 #[derive(Debug)]
@@ -487,10 +531,23 @@ pub enum InputKind {
     Search,
     ReaderSearch,
     NewBookmark,
-    EditLabels { ids: Vec<String> },
-    EditNote { id: String },
-    EditTitle { id: String },
-    RenameLabel { from: String },
+    EditLabels {
+        ids: Vec<String>,
+    },
+    EditNote {
+        id: String,
+    },
+    EditTitle {
+        id: String,
+    },
+    RenameLabel {
+        from: String,
+    },
+    AnnotationNote {
+        bookmark_id: String,
+        id: String,
+        color: String,
+    },
 }
 
 pub struct App {
@@ -861,6 +918,92 @@ impl App {
                     self.modal = Some(Modal::Input(input));
                 }
             },
+            Modal::Annotations(mut annotations) => {
+                let list = self
+                    .reader
+                    .as_ref()
+                    .map(|reader| reader.annotations.clone())
+                    .unwrap_or_default();
+                let count = list.len();
+                let mut reopen = true;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => reopen = false,
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if count > 0 {
+                            annotations.selected =
+                                (annotations.selected + 1).min(count - 1);
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        annotations.selected =
+                            annotations.selected.saturating_sub(1);
+                    }
+                    KeyCode::Char('n') => {
+                        self.create_annotation(
+                            &annotations.bookmark_id,
+                            annotations.block,
+                        );
+                    }
+                    KeyCode::Char('e') => {
+                        if let Some(annotation) = list.get(annotations.selected)
+                        {
+                            self.edit_annotation_note(
+                                &annotations.bookmark_id,
+                                annotation,
+                            );
+                            reopen = false;
+                        }
+                    }
+                    KeyCode::Char('c') => {
+                        if let Some(annotation) = list.get(annotations.selected)
+                        {
+                            let color =
+                                next_annotation_color(annotation.color());
+                            self.update_annotation(
+                                annotations.bookmark_id.clone(),
+                                annotation.id.clone(),
+                                color.to_string(),
+                                annotation.note.clone(),
+                            );
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        if let Some(annotation) = list.get(annotations.selected)
+                        {
+                            self.delete_annotation(
+                                annotations.bookmark_id.clone(),
+                                annotation.id.clone(),
+                            );
+                            annotations.selected =
+                                annotations.selected.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(annotation) = list.get(annotations.selected)
+                        {
+                            let block =
+                                self.reader.as_ref().and_then(|reader| {
+                                    reader.annotation_block(annotation)
+                                });
+                            match block {
+                                Some(block) => {
+                                    if let Some(reader) = &mut self.reader {
+                                        reader.jump_to_block(block);
+                                    }
+                                    reopen = false;
+                                }
+                                None => self.toast_info(
+                                    "This annotation is not in the article",
+                                ),
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if reopen {
+                    self.modal = Some(Modal::Annotations(annotations));
+                }
+            }
             Modal::ThemePicker(mut picker) => {
                 let themes = crate::ui::theme::all();
                 let len = themes.len().max(1);
@@ -1395,6 +1538,7 @@ impl App {
             KeyCode::Char('i') => self.toggle_reader_images(),
             KeyCode::Char('A') => self.toggle_reader_alignment(),
             KeyCode::Char('s') => self.toggle_speed_reading(),
+            KeyCode::Char('H') => self.open_annotations(),
             KeyCode::Char('D') => self.confirm_delete(),
             KeyCode::Char('/') => self.open_reader_search(),
             KeyCode::Char('n') => {
@@ -1653,6 +1797,7 @@ impl App {
             reader.set_article(fallback_article(&bookmark));
             self.reader = Some(reader);
         }
+        self.request_annotations(&bookmark.id);
     }
 
     fn request_article(&mut self, id: &str) {
@@ -1681,6 +1826,137 @@ impl App {
             };
             let _ = tx.send(Event::api(ApiEvent::Article { id, result }));
         });
+    }
+
+    fn request_annotations(&mut self, bookmark_id: &str) {
+        if self.offline_mode {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let bookmark_id = bookmark_id.to_string();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.annotations(&bookmark_id).await;
+            let _ = tx.send(Event::api(ApiEvent::Annotations {
+                bookmark_id,
+                result,
+            }));
+        });
+    }
+
+    fn open_annotations(&mut self) {
+        let Some(reader) = &self.reader else {
+            return;
+        };
+        if self.offline_mode || self.offline {
+            self.toast_error("Annotations require a connection to Readeck");
+            return;
+        }
+        let bookmark_id = reader.bookmark.id.clone();
+        let block = reader.block_at_scroll();
+        self.modal = Some(Modal::Annotations(AnnotationsModal {
+            bookmark_id,
+            block,
+            selected: 0,
+        }));
+    }
+
+    fn create_annotation(&mut self, bookmark_id: &str, block: Option<usize>) {
+        if self.offline_mode || self.offline {
+            self.toast_error("Annotations require a connection to Readeck");
+            return;
+        }
+        let source = self
+            .reader
+            .as_ref()
+            .and_then(|reader| reader.article.as_ref())
+            .and_then(|article| {
+                block.and_then(|block| article.sources.get(block))
+            })
+            .and_then(|source| source.clone());
+        let Some(source) = source else {
+            self.toast_error("This paragraph cannot be annotated");
+            return;
+        };
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let bookmark_id = bookmark_id.to_string();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .create_annotation(
+                    &bookmark_id,
+                    (&source.path, 0),
+                    (&source.path, source.len),
+                    "yellow",
+                    "",
+                )
+                .await;
+            let _ = tx.send(Event::api(ApiEvent::AnnotationCreated {
+                bookmark_id,
+                result,
+            }));
+        });
+    }
+
+    fn update_annotation(
+        &mut self,
+        bookmark_id: String,
+        id: String,
+        color: String,
+        note: String,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .update_annotation(&bookmark_id, &id, &color, &note)
+                .await;
+            let _ = tx.send(Event::api(ApiEvent::AnnotationUpdated {
+                bookmark_id,
+                id,
+                color,
+                note,
+                result,
+            }));
+        });
+    }
+
+    fn delete_annotation(&mut self, bookmark_id: String, id: String) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.delete_annotation(&bookmark_id, &id).await;
+            let _ = tx.send(Event::api(ApiEvent::AnnotationDeleted {
+                bookmark_id,
+                id,
+                result,
+            }));
+        });
+    }
+
+    fn edit_annotation_note(
+        &mut self,
+        bookmark_id: &str,
+        annotation: &Annotation,
+    ) {
+        self.modal = Some(Modal::Input(InputModal::new(
+            "Annotation note",
+            "Note for this annotation (empty clears it)",
+            TextInput::new(annotation.note.clone()),
+            InputKind::AnnotationNote {
+                bookmark_id: bookmark_id.to_string(),
+                id: annotation.id.clone(),
+                color: annotation.color().to_string(),
+            },
+        )));
     }
 
     fn request_images_for_reader(
@@ -2533,6 +2809,13 @@ impl App {
                 };
                 self.update_bookmark(id, patch, "Title updated", false);
             }
+            InputKind::AnnotationNote {
+                bookmark_id,
+                id,
+                color,
+            } => {
+                self.update_annotation(bookmark_id, id, color, value);
+            }
             InputKind::RenameLabel { from } => {
                 if value.is_empty() {
                     self.toast_error("The label name cannot be empty.");
@@ -3004,6 +3287,110 @@ impl App {
                     }
                 }
             }
+            ApiEvent::Annotations {
+                bookmark_id,
+                result,
+            } => {
+                if !self
+                    .reader
+                    .as_ref()
+                    .is_some_and(|reader| reader.bookmark.id == bookmark_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(annotations) => {
+                        if let Some(reader) = &mut self.reader {
+                            reader.annotations = annotations;
+                        }
+                    }
+                    Err(err) => {
+                        if !self.handle_unauthorized(&err) {
+                            self.toast_error(format!(
+                                "Could not load annotations: {err}"
+                            ));
+                        }
+                    }
+                }
+            }
+            ApiEvent::AnnotationCreated {
+                bookmark_id,
+                result,
+            } => match result {
+                Ok(annotation) => {
+                    if let Some(reader) = &mut self.reader {
+                        if reader.bookmark.id == bookmark_id {
+                            reader.annotations.push(annotation);
+                        }
+                    }
+                    self.toast_success("Annotation added");
+                }
+                Err(err) => {
+                    if err.is_network() {
+                        self.offline = true;
+                        self.toast_error(
+                            "Annotations require a connection to Readeck",
+                        );
+                    } else if !self.handle_unauthorized(&err) {
+                        self.toast_error(format!(
+                            "Could not add the annotation: {err}"
+                        ));
+                    }
+                }
+            },
+            ApiEvent::AnnotationUpdated {
+                bookmark_id,
+                id,
+                color,
+                note,
+                result,
+            } => match result {
+                Ok(()) => {
+                    if let Some(reader) = &mut self.reader {
+                        if reader.bookmark.id == bookmark_id {
+                            if let Some(annotation) = reader
+                                .annotations
+                                .iter_mut()
+                                .find(|annotation| annotation.id == id)
+                            {
+                                annotation.color = color;
+                                annotation.note = note;
+                            }
+                        }
+                    }
+                    self.toast_success("Annotation updated");
+                }
+                Err(err) => {
+                    if !self.handle_unauthorized(&err) {
+                        self.toast_error(format!(
+                            "Could not update the annotation: {err}"
+                        ));
+                    }
+                }
+            },
+            ApiEvent::AnnotationDeleted {
+                bookmark_id,
+                id,
+                result,
+            } => match result {
+                Ok(()) => {
+                    if let Some(reader) = &mut self.reader {
+                        if reader.bookmark.id == bookmark_id {
+                            reader
+                                .annotations
+                                .retain(|annotation| annotation.id != id);
+                        }
+                    }
+                    self.toast_success("Annotation deleted");
+                }
+                Err(err) => {
+                    if !self.handle_unauthorized(&err) {
+                        self.toast_error(format!(
+                            "Could not delete the annotation: {err}"
+                        ));
+                    }
+                }
+            },
             ApiEvent::Image {
                 bookmark_id,
                 url,
@@ -3502,6 +3889,17 @@ impl App {
 /// Forward moves to the start of the next label, or to the end of the line
 /// when there is none. Backward moves to the start of the current label, or
 /// to the previous one when the cursor is already there.
+const ANNOTATION_COLORS: [&str; 5] =
+    ["yellow", "red", "green", "blue", "purple"];
+
+fn next_annotation_color(color: &str) -> &'static str {
+    let index = ANNOTATION_COLORS
+        .iter()
+        .position(|value| value.eq_ignore_ascii_case(color))
+        .unwrap_or(0);
+    ANNOTATION_COLORS[(index + 1) % ANNOTATION_COLORS.len()]
+}
+
 fn label_jump(value: &str, cursor: usize, forward: bool) -> usize {
     let chars: Vec<char> = value.chars().collect();
     let cursor = cursor.min(chars.len());
@@ -4122,6 +4520,102 @@ mod tests {
         // Left border, the " / " prompt, then the four typed characters.
         let position = terminal.backend_mut().get_cursor_position().unwrap();
         assert_eq!((position.x, position.y), (8, 1));
+    }
+
+    #[test]
+    fn annotations_map_to_article_blocks() {
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.set_article(parse_article("<p>first</p><p>second</p>"));
+        reader.viewport = 1;
+        reader.annotations = vec![Annotation {
+            id: "a1".into(),
+            start_selector: "p[2]".into(),
+            ..Default::default()
+        }];
+
+        let block = reader.annotation_block(&reader.annotations[0]).unwrap();
+        assert_eq!(reader.lines[0].block, Some(0));
+        assert!(reader.jump_to_block(block));
+        assert_eq!(reader.block_at_scroll(), Some(1));
+        assert_eq!(reader.annotation_block(&reader.annotations[0]), Some(1));
+    }
+
+    #[test]
+    fn annotated_paragraphs_use_the_annotation_color() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app_with_bookmarks(1);
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                title: Some("Article".into()),
+                has_article: true,
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.set_article(parse_article("<p>alpha beta gamma</p>"));
+        reader.annotations = vec![Annotation {
+            id: "a1".into(),
+            start_selector: "p[1]".into(),
+            color: "red".into(),
+            ..Default::default()
+        }];
+        app.reader = Some(reader);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let expected = crate::ui::annotation_color("red");
+        let mut checked = false;
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if let Some(index) = row.find("alpha") {
+                assert_eq!(buffer[(index as u16, y)].fg, expected);
+                checked = true;
+            }
+        }
+        assert!(checked, "article text was not rendered");
+    }
+
+    #[test]
+    fn annotations_modal_opens_on_the_current_block() {
+        let mut app = test_app_with_bookmarks(1);
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.set_article(parse_article("<p>first</p>"));
+        app.reader = Some(reader);
+
+        app.open_annotations();
+        match app.modal.as_ref().unwrap() {
+            Modal::Annotations(modal) => {
+                assert_eq!(modal.bookmark_id, "b1");
+                assert_eq!(modal.block, Some(0));
+            }
+            _ => panic!("expected the annotations modal"),
+        }
     }
 
     #[test]

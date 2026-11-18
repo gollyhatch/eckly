@@ -19,6 +19,8 @@ headings, lists, quotes, code blocks and inline images:
   reading progress, favorites and archives, or filter by label or collection.
 - **Search** your library with Readeck's full-text search, or search within the
   current article with highlighted matches.
+- **Annotate** paragraphs with colored highlights and notes, and browse or edit
+  them from the reader.
 - **Read** extracted articles in a comfortable, scrollable reader. Plain text is
   reflowed to the terminal width; headings, lists, quotes, code and images are
   rendered inline. Images use truecolor half blocks and are fetched from
@@ -317,6 +319,7 @@ progress or archive status.
 | `i` | Enable / disable inline images |
 | `A` | Toggle centered / left-aligned text |
 | `s` | Speed reading (RSVP) |
+| `H` | Annotations (view, add, edit, delete) |
 | `o` | Open in browser |
 | `r` | Retry loading the article |
 | `Esc` | Clear the article search, then return to the list |
@@ -325,6 +328,16 @@ progress or archive status.
 While speed reading, `Space` pauses or resumes, `h`/`l` (or `←`/`→`) step one
 word and pause, `+` / `-` change the pace by 25 words per minute, and `s` or
 `Esc` returns to the article.
+
+### Annotations
+
+Highlights from Readeck are shown in the reader: paragraphs covered by an
+annotation are drawn in its color. `H` opens the annotation list, where `n`
+annotates the paragraph at the top of the view, `e` edits its note, `c` cycles
+the color (`yellow`, `red`, `green`, `blue`, `purple`), `d` deletes it and
+`Enter` jumps to it. Highlights created in eckly cover a whole paragraph;
+annotations made in Readeck's web UI are shown on the paragraph that contains
+them. Annotations need a connection to Readeck.
 
 ### General
 

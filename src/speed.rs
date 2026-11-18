@@ -169,6 +169,7 @@ mod tests {
                 text: (*text).to_string(),
                 kind: Some(BlockKind::Paragraph),
                 image: None,
+                block: None,
             })
             .collect()
     }

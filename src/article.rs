@@ -31,11 +31,22 @@ pub struct Block {
     pub text: String,
 }
 
+/// Where a block came from in the article HTML, for annotations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    /// Readeck annotation selector (`p[2]`, `section[1]/ul[1]/li[3]`).
+    pub path: String,
+    /// Length of the element's text in characters.
+    pub len: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Article {
     pub blocks: Vec<Block>,
     /// Maps an image block's index to its source URL.
     pub images: HashMap<usize, String>,
+    /// Annotation source for each block, when it can be computed.
+    pub sources: Vec<Option<Source>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +63,8 @@ pub struct WrappedLine {
     pub kind: Option<BlockKind>,
     /// Pre-rendered image cells when this line is part of an image.
     pub image: Option<Vec<ImageCell>>,
+    /// Index of the block this line belongs to.
+    pub block: Option<usize>,
 }
 
 impl Article {
@@ -83,6 +96,7 @@ impl Article {
                     text: String::new(),
                     kind: None,
                     image: None,
+                    block: None,
                 });
             }
 
@@ -93,7 +107,12 @@ impl Article {
                     .map(|image| render_image(image, width))
                     .filter(|rows| !rows.is_empty())
                 {
-                    lines.extend(rows);
+                    for row in rows {
+                        lines.push(WrappedLine {
+                            block: Some(index),
+                            ..row
+                        });
+                    }
                 } else {
                     let alt = block.text.trim();
                     let label = if alt.is_empty() {
@@ -113,6 +132,7 @@ impl Article {
                             text: line.into_owned(),
                             kind: Some(BlockKind::Image),
                             image: None,
+                            block: Some(index),
                         });
                     }
                 }
@@ -125,6 +145,7 @@ impl Article {
                     text: "─".repeat(width.min(80)),
                     kind: Some(BlockKind::Rule),
                     image: None,
+                    block: Some(index),
                 });
                 previous = Some(block.kind);
                 continue;
@@ -147,6 +168,7 @@ impl Article {
                     text: line.into_owned(),
                     kind: Some(block.kind),
                     image: None,
+                    block: Some(index),
                 });
             }
             previous = Some(block.kind);
@@ -161,7 +183,7 @@ impl Article {
     /// Build a small article from arbitrary text, used for bookmarks without
     /// an extracted article (for example a note or description).
     pub fn from_text_blocks(blocks: Vec<(&str, String)>) -> Self {
-        let blocks = blocks
+        let blocks: Vec<Block> = blocks
             .into_iter()
             .filter(|(_, text)| !text.trim().is_empty())
             .map(|(heading, text)| Block {
@@ -169,9 +191,11 @@ impl Article {
                 text: text.trim().to_string(),
             })
             .collect();
+        let sources = vec![None; blocks.len()];
         Self {
             blocks,
             images: HashMap::new(),
+            sources,
         }
     }
 }
@@ -215,6 +239,7 @@ fn render_image(image: &DynamicImage, width: usize) -> Vec<WrappedLine> {
             text: " ".repeat(target_width as usize),
             kind: Some(BlockKind::Image),
             image: Some(cells),
+            block: None,
         });
     }
     rows
@@ -229,13 +254,26 @@ fn heading_kind(heading: &str) -> BlockKind {
 
 pub fn parse_article(html: &str) -> Article {
     let document = Html::parse_document(html);
-    let mut collector = Collector::default();
-    for child in document.tree.root().children() {
-        collector.walk(child, Context::default());
-    }
+    let body = document
+        .root_element()
+        .children()
+        .find(|node| {
+            node.value()
+                .as_element()
+                .is_some_and(|element| element.name() == "body")
+        })
+        .unwrap_or_else(|| document.tree.root());
+    let mut collector = Collector::new(body);
+    collector.walk(body, Context::default());
+    let sources = collector
+        .block_sources
+        .iter()
+        .map(|index| index.map(|i| collector.sources[i].clone()))
+        .collect();
     Article {
         blocks: collector.blocks,
         images: collector.images,
+        sources,
     }
 }
 
@@ -244,6 +282,7 @@ struct Context {
     quote: bool,
     list_depth: usize,
     prefix: Option<&'static str>,
+    source: Option<usize>,
 }
 
 impl Context {
@@ -262,14 +301,42 @@ impl Context {
     }
 }
 
-#[derive(Default)]
-struct Collector {
+struct Collector<'a> {
+    body: NodeRef<'a, Node>,
     blocks: Vec<Block>,
+    block_sources: Vec<Option<usize>>,
+    sources: Vec<Source>,
     buffer: String,
     images: HashMap<usize, String>,
 }
 
-impl Collector {
+impl<'a> Collector<'a> {
+    fn new(body: NodeRef<'a, Node>) -> Self {
+        Self {
+            body,
+            blocks: Vec::new(),
+            block_sources: Vec::new(),
+            sources: Vec::new(),
+            buffer: String::new(),
+            images: HashMap::new(),
+        }
+    }
+
+    fn push_block(&mut self, block: Block, source: Option<usize>) {
+        self.blocks.push(block);
+        self.block_sources.push(source);
+    }
+
+    fn source_for(&mut self, node: NodeRef<'_, Node>) -> Option<usize> {
+        let path = selector_for(self.body, node)?;
+        let len = text_content(node).chars().count();
+        if len == 0 {
+            return None;
+        }
+        self.sources.push(Source { path, len });
+        Some(self.sources.len() - 1)
+    }
+
     fn walk(&mut self, node: NodeRef<'_, Node>, context: Context) {
         if let Some(text) = node.value().as_text() {
             self.buffer.push_str(&text.text);
@@ -300,10 +367,13 @@ impl Collector {
                     .filter(|src| !src.is_empty() && !src.starts_with("data:"))
                 {
                     self.flush(context);
-                    self.blocks.push(Block {
-                        kind: BlockKind::Image,
-                        text: alt,
-                    });
+                    self.push_block(
+                        Block {
+                            kind: BlockKind::Image,
+                            text: alt,
+                        },
+                        None,
+                    );
                     let index = self.blocks.len() - 1;
                     self.images.insert(index, src.to_string());
                 } else if !alt.is_empty() {
@@ -314,10 +384,13 @@ impl Collector {
             }
             "hr" => {
                 self.flush(context);
-                self.blocks.push(Block {
-                    kind: BlockKind::Rule,
-                    text: String::new(),
-                });
+                self.push_block(
+                    Block {
+                        kind: BlockKind::Rule,
+                        text: String::new(),
+                    },
+                    None,
+                );
             }
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 self.flush(context);
@@ -328,7 +401,8 @@ impl Collector {
                         "h2" => BlockKind::Heading2,
                         _ => BlockKind::Heading3,
                     };
-                    self.blocks.push(Block { kind, text });
+                    let source = self.source_for(node);
+                    self.push_block(Block { kind, text }, source);
                 }
             }
             "pre" => {
@@ -344,15 +418,21 @@ impl Collector {
                 }
                 for line in lines {
                     if line.trim().is_empty() {
-                        self.blocks.push(Block {
-                            kind: BlockKind::Code,
-                            text: String::new(),
-                        });
+                        self.push_block(
+                            Block {
+                                kind: BlockKind::Code,
+                                text: String::new(),
+                            },
+                            None,
+                        );
                     } else {
-                        self.blocks.push(Block {
-                            kind: BlockKind::Code,
-                            text: line.to_string(),
-                        });
+                        self.push_block(
+                            Block {
+                                kind: BlockKind::Code,
+                                text: line.to_string(),
+                            },
+                            None,
+                        );
                     }
                 }
             }
@@ -370,10 +450,13 @@ impl Collector {
                     }
                 }
                 if !cells.is_empty() {
-                    self.blocks.push(Block {
-                        kind: BlockKind::Paragraph,
-                        text: cells.join("  ·  "),
-                    });
+                    self.push_block(
+                        Block {
+                            kind: BlockKind::Paragraph,
+                            text: cells.join("  ·  "),
+                        },
+                        None,
+                    );
                 }
             }
             "li" => {
@@ -384,6 +467,7 @@ impl Collector {
                     2 => "◦ ",
                     _ => "▪ ",
                 });
+                child_context.source = self.source_for(node).or(context.source);
                 for child in node.children() {
                     self.walk(child, child_context);
                 }
@@ -402,7 +486,8 @@ impl Collector {
             }
             "blockquote" => {
                 self.flush(context);
-                let child_context = context.in_quote().without_prefix();
+                let mut child_context = context.in_quote().without_prefix();
+                child_context.source = self.source_for(node).or(context.source);
                 for child in node.children() {
                     self.walk(child, child_context);
                 }
@@ -412,18 +497,24 @@ impl Collector {
                 self.flush(context);
                 let text = normalize(&text_content(node));
                 if !text.is_empty() {
-                    self.blocks.push(Block {
-                        kind: BlockKind::Caption,
-                        text,
-                    });
+                    let source = self.source_for(node);
+                    self.push_block(
+                        Block {
+                            kind: BlockKind::Caption,
+                            text,
+                        },
+                        source,
+                    );
                 }
             }
             _ if is_block(name) => {
                 self.flush(context);
+                let mut child_context = context;
+                child_context.source = self.source_for(node).or(context.source);
                 for child in node.children() {
-                    self.walk(child, context);
+                    self.walk(child, child_context);
                 }
-                self.flush(context);
+                self.flush(child_context);
             }
             _ => {
                 for child in node.children() {
@@ -447,8 +538,36 @@ impl Collector {
         } else {
             (BlockKind::Paragraph, text)
         };
-        self.blocks.push(Block { kind, text });
+        self.push_block(Block { kind, text }, context.source);
     }
+}
+
+fn selector_for(
+    root: NodeRef<'_, Node>,
+    node: NodeRef<'_, Node>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut current = node;
+    while current.id() != root.id() {
+        let element = current.value().as_element()?;
+        let mut index = 1;
+        let mut sibling = current.prev_sibling();
+        while let Some(previous) = sibling {
+            if let Some(previous_element) = previous.value().as_element() {
+                if previous_element.name() == element.name() {
+                    index += 1;
+                }
+            }
+            sibling = previous.prev_sibling();
+        }
+        parts.push(format!("{}[{}]", element.name(), index));
+        current = current.parent()?;
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.reverse();
+    Some(parts.join("/"))
 }
 
 fn text_content(node: NodeRef<'_, Node>) -> String {
@@ -498,6 +617,44 @@ fn is_block(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn records_annotation_sources() {
+        let html = r#"<section>
+            <h1>Title</h1>
+            <p>Hello <strong>world</strong>!</p>
+            <ul><li>a</li><li>b</li><li>c</li><li>target text</li></ul>
+        </section>"#;
+        let article = parse_article(html);
+
+        let paragraph = article
+            .blocks
+            .iter()
+            .position(|block| block.text.starts_with("Hello"))
+            .unwrap();
+        let source = article.sources[paragraph].as_ref().unwrap();
+        assert_eq!(source.path, "section[1]/p[1]");
+        assert_eq!(source.len, "Hello world!".chars().count());
+
+        let item = article
+            .blocks
+            .iter()
+            .position(|block| block.text.contains("target"))
+            .unwrap();
+        let source = article.sources[item].as_ref().unwrap();
+        assert_eq!(source.path, "section[1]/ul[1]/li[4]");
+        assert_eq!(source.len, "target text".chars().count());
+
+        let heading = article
+            .blocks
+            .iter()
+            .position(|block| block.kind == BlockKind::Heading1)
+            .unwrap();
+        assert_eq!(
+            article.sources[heading].as_ref().unwrap().path,
+            "section[1]/h1[1]"
+        );
+    }
 
     #[test]
     fn extracts_structure() {

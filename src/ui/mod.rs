@@ -197,6 +197,17 @@ pub(crate) fn status_line(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Map a Readeck annotation color to the theme palette.
+pub(crate) fn annotation_color(name: &str) -> ratatui::style::Color {
+    match name.to_ascii_lowercase().as_str() {
+        "red" => theme::red(),
+        "green" => theme::green(),
+        "blue" => theme::accent(),
+        "purple" => theme::purple(),
+        _ => theme::accent_alt(),
+    }
+}
+
 pub(crate) fn spinner(tick: u64) -> &'static str {
     const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
     FRAMES[(tick as usize) % FRAMES.len()]

@@ -2,10 +2,13 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 
 use crate::app::{
-    App, ConfirmModal, InputKind, InputModal, Modal, ThemePicker,
+    AnnotationsModal, App, ConfirmModal, InputKind, InputModal, Modal,
+    ThemePicker,
 };
 
 use super::theme;
@@ -20,13 +23,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Some(Modal::ThemePicker(picker)) => {
             draw_theme_picker(frame, frame.area(), picker)
         }
+        Some(Modal::Annotations(annotations)) => {
+            draw_annotations(frame, frame.area(), app, annotations)
+        }
         None => {}
     }
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
     let width = area.width.saturating_sub(4).min(88);
-    let height = area.height.saturating_sub(2).min(29);
+    let height = area.height.saturating_sub(2).min(33);
     let popup = centered_rect(area, width, height);
     frame.render_widget(Clear, popup);
 
@@ -99,10 +105,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         binding("i", "Toggle images"),
         binding("A", "Toggle text alignment"),
         binding("s", "Speed reading (Space, +/- pace)"),
+        binding("H", "Annotations (n, e, c, d)"),
         binding("o", "Open in browser"),
         binding("r", "Retry article"),
         binding("Esc", "Clear search, then back"),
-        Line::from(""),
         section("General"),
         binding("?", "Toggle this help"),
         binding("Ctrl+T", "Choose color theme"),
@@ -113,7 +119,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             Style::new().fg(theme::dim()),
         )),
         Line::from(Span::styled(
-            "Labels are edited as a comma separated list.",
+            "Labels: comma separated; Tab completes.",
             Style::new().fg(theme::dim()),
         )),
         Line::from(Span::styled(
@@ -121,15 +127,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             Style::new().fg(theme::dim()),
         )),
         Line::from(Span::styled(
-            "Tab completes labels in the label editor.",
-            Style::new().fg(theme::dim()),
-        )),
-        Line::from(Span::styled(
             "In the library, / filters labels and collections.",
             Style::new().fg(theme::dim()),
         )),
         Line::from(Span::styled(
-            "In the list, Esc clears search, then selection, then focuses the library.",
+            "In the list, Esc clears search, then selection.",
             Style::new().fg(theme::dim()),
         )),
     ];
@@ -333,6 +335,91 @@ fn draw_input(frame: &mut Frame, area: Rect, input: &InputModal) {
         field_area.x + 2 + visible.cursor_column,
         field_area.y,
     ));
+}
+
+fn draw_annotations(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    modal: &AnnotationsModal,
+) {
+    let width = area.width.saturating_sub(4).min(88);
+    let height = area.height.saturating_sub(4).min(24);
+    let popup = centered_rect(area, width, height);
+    frame.render_widget(Clear, popup);
+
+    let annotations = app
+        .reader
+        .as_ref()
+        .filter(|reader| reader.bookmark.id == modal.bookmark_id)
+        .map(|reader| reader.annotations.as_slice())
+        .unwrap_or(&[]);
+
+    let block = Block::bordered()
+        .border_style(Style::new().fg(theme::accent()))
+        .style(Style::new().bg(theme::bg_base()))
+        .title(Line::from(Span::styled(
+            format!(" Annotations ({}) ", annotations.len()),
+            Style::new()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        )))
+        .title_bottom(Line::from(Span::styled(
+            " n new · e note · c color · d delete · Enter go · Esc close ",
+            Style::new().fg(theme::faint()),
+        )));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if annotations.is_empty() {
+        let y = inner.y + inner.height / 2;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "No annotations yet — press n to annotate this paragraph",
+                Style::new().fg(theme::dim()),
+            )))
+            .alignment(Alignment::Center),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        return;
+    }
+
+    let text_width = inner.width.saturating_sub(5) as usize;
+    let items: Vec<ListItem> = annotations
+        .iter()
+        .map(|annotation| {
+            let color = super::annotation_color(annotation.color());
+            let mut spans = vec![
+                Span::styled("▍ ", Style::new().fg(color)),
+                Span::styled(
+                    super::truncate_width(
+                        &annotation.text.replace('\n', " "),
+                        text_width.saturating_sub(2),
+                    ),
+                    Style::new().fg(theme::text()),
+                ),
+            ];
+            let note = annotation.note.trim();
+            if !note.is_empty() {
+                spans.push(Span::styled(
+                    format!("  — {}", super::truncate_width(note, 40)),
+                    Style::new().fg(theme::dim()),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(modal.selected.min(annotations.len() - 1)));
+    let list = List::new(items)
+        .highlight_style(
+            Style::new()
+                .bg(theme::bg_selected())
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("› ");
+    frame.render_stateful_widget(list, inner, &mut state);
 }
 
 fn draw_theme_picker(frame: &mut Frame, area: Rect, picker: &ThemePicker) {

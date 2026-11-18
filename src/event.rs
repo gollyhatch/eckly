@@ -41,6 +41,26 @@ pub enum ApiEvent {
         id: String,
         result: Result<Article, ApiError>,
     },
+    Annotations {
+        bookmark_id: String,
+        result: Result<Vec<crate::models::Annotation>, ApiError>,
+    },
+    AnnotationCreated {
+        bookmark_id: String,
+        result: Result<crate::models::Annotation, ApiError>,
+    },
+    AnnotationUpdated {
+        bookmark_id: String,
+        id: String,
+        color: String,
+        note: String,
+        result: Result<(), ApiError>,
+    },
+    AnnotationDeleted {
+        bookmark_id: String,
+        id: String,
+        result: Result<(), ApiError>,
+    },
     Image {
         bookmark_id: String,
         url: String,

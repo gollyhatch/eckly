@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::config::normalize_server;
 use crate::models::{
-    Bookmark, BookmarkPatch, BookmarkQuery, Collection, Label, Page, Profile,
-    SyncChange,
+    Annotation, Bookmark, BookmarkPatch, BookmarkQuery, Collection, Label,
+    Page, Profile, SyncChange,
 };
 
 const OAUTH_CLIENT_URI: &str = "https://github.com/gollyhatch/eckly";
@@ -314,6 +314,91 @@ impl ReadeckClient {
             .map(|value| value.with_timezone(&Utc));
         let changes = response.json::<Vec<SyncChange>>().await?;
         Ok((changes, time))
+    }
+
+    /// Highlights on a bookmark's article.
+    pub async fn annotations(
+        &self,
+        bookmark_id: &str,
+    ) -> Result<Vec<Annotation>, ApiError> {
+        let response = self
+            .send_ok(
+                self.http
+                    .get(self.endpoint(&format!(
+                        "/bookmarks/{bookmark_id}/annotations"
+                    )))
+                    .bearer_auth(self.token.as_ref()),
+            )
+            .await?;
+        Ok(response.json::<Vec<Annotation>>().await?)
+    }
+
+    /// Highlight a range of the article. Selectors are Readeck annotation
+    /// selectors (`tag[n]/...`), offsets count characters in that element.
+    pub async fn create_annotation(
+        &self,
+        bookmark_id: &str,
+        start: (&str, usize),
+        end: (&str, usize),
+        color: &str,
+        note: &str,
+    ) -> Result<Annotation, ApiError> {
+        let response = self
+            .send_ok(
+                self.http
+                    .post(self.endpoint(&format!(
+                        "/bookmarks/{bookmark_id}/annotations"
+                    )))
+                    .bearer_auth(self.token.as_ref())
+                    .json(&serde_json::json!({
+                        "start_selector": start.0,
+                        "start_offset": start.1,
+                        "end_selector": end.0,
+                        "end_offset": end.1,
+                        "color": color,
+                        "note": note,
+                    })),
+            )
+            .await?;
+        Ok(response.json::<Annotation>().await?)
+    }
+
+    pub async fn update_annotation(
+        &self,
+        bookmark_id: &str,
+        id: &str,
+        color: &str,
+        note: &str,
+    ) -> Result<(), ApiError> {
+        self.send_ok(
+            self.http
+                .patch(self.endpoint(&format!(
+                    "/bookmarks/{bookmark_id}/annotations/{id}"
+                )))
+                .bearer_auth(self.token.as_ref())
+                .json(&serde_json::json!({
+                    "color": color,
+                    "note": note,
+                })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_annotation(
+        &self,
+        bookmark_id: &str,
+        id: &str,
+    ) -> Result<(), ApiError> {
+        self.send_ok(
+            self.http
+                .delete(self.endpoint(&format!(
+                    "/bookmarks/{bookmark_id}/annotations/{id}"
+                )))
+                .bearer_auth(self.token.as_ref()),
+        )
+        .await?;
+        Ok(())
     }
 
     /// The article body is an HTML fragment rather than a complete document.
@@ -871,6 +956,60 @@ mod tests {
         let request = server.await.unwrap();
         assert!(request.starts_with("GET /api/bookmarks/sync?"));
         assert!(request.contains("since=2026-11-14T20%3A00%3A00.000000000Z"));
+    }
+
+    #[tokio::test]
+    async fn reads_and_writes_annotations() {
+        let body = r#"[{"id":"a1","start_selector":"p[1]","start_offset":0,
+            "end_selector":"p[1]","end_offset":4,"color":"yellow",
+            "text":"text","note":"n"}]"#;
+        let (base, server) =
+            serve_once(response("200 OK", "", body), false).await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        let annotations = client.annotations("b1").await.unwrap();
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].start_selector, "p[1]");
+        assert_eq!(annotations[0].end_offset, 4);
+        assert_eq!(annotations[0].note, "n");
+        let request = server.await.unwrap();
+        assert!(request.starts_with("GET /api/bookmarks/b1/annotations "));
+
+        let (base, server) =
+            serve_once(response("201 Created", "", r#"{"id":"a2"}"#), true)
+                .await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        let created = client
+            .create_annotation("b1", ("p[1]", 0), ("p[1]", 4), "red", "note")
+            .await
+            .unwrap();
+        assert_eq!(created.id, "a2");
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /api/bookmarks/b1/annotations "));
+        assert!(request.contains("\"start_selector\":\"p[1]\""));
+        assert!(request.contains("\"end_offset\":4"));
+        assert!(request.contains("\"color\":\"red\""));
+        assert!(request.contains("\"note\":\"note\""));
+
+        let (base, server) =
+            serve_once(response("200 OK", "", r#"{"annotations":[]}"#), true)
+                .await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        client
+            .update_annotation("b1", "a2", "green", "changed")
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with("PATCH /api/bookmarks/b1/annotations/a2 "));
+        assert!(request.contains("\"color\":\"green\""));
+
+        let (base, server) =
+            serve_once(response("204 No Content", "", ""), false).await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        client.delete_annotation("b1", "a2").await.unwrap();
+        let request = server.await.unwrap();
+        assert!(
+            request.starts_with("DELETE /api/bookmarks/b1/annotations/a2 ")
+        );
     }
 
     #[tokio::test]

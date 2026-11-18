@@ -285,6 +285,39 @@ pub struct User {
     pub email: String,
 }
 
+/// A highlight (annotation) on a bookmark's article.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Annotation {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub start_selector: String,
+    #[serde(default)]
+    pub start_offset: usize,
+    #[serde(default)]
+    pub end_selector: String,
+    #[serde(default)]
+    pub end_offset: usize,
+    #[serde(default)]
+    pub color: String,
+    #[serde(default, deserialize_with = "deserialize_entity_string")]
+    pub text: String,
+    #[serde(default, deserialize_with = "deserialize_entity_string")]
+    pub note: String,
+    #[serde(default, deserialize_with = "deserialize_opt_datetime")]
+    pub created: Option<DateTime<Utc>>,
+}
+
+impl Annotation {
+    pub fn color(&self) -> &str {
+        if self.color.is_empty() {
+            "yellow"
+        } else {
+            &self.color
+        }
+    }
+}
+
 /// A page of results plus the total count Readeck reports.
 #[derive(Debug, Clone, Default)]
 pub struct Page<T> {
