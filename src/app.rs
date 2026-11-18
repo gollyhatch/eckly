@@ -579,6 +579,8 @@ impl Reader {
             .unwrap_or(end_source.offsets.len());
 
         if start_index == end_index {
+            let end_char =
+                trim_trailing_space(article, start_index, start_char, end_char);
             if start_char >= end_char {
                 return None;
             }
@@ -590,6 +592,7 @@ impl Reader {
         } else {
             (end_index, end_char, start_index, start_char)
         };
+        let last_to = trim_trailing_space(article, last, 0, last_to);
         let mut ranges = Vec::new();
         for block in first..=last {
             let length = article
@@ -4234,6 +4237,23 @@ fn next_annotation_color(color: &str) -> &'static str {
     ANNOTATION_COLORS[(index + 1) % ANNOTATION_COLORS.len()]
 }
 
+/// Keep note separators outside the highlight.
+fn trim_trailing_space(
+    article: &crate::article::Article,
+    block: usize,
+    start: usize,
+    mut end: usize,
+) -> usize {
+    let Some(text) = article.blocks.get(block).map(|block| &block.text) else {
+        return end;
+    };
+    let chars: Vec<char> = text.chars().collect();
+    while end > start && end <= chars.len() && chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    end
+}
+
 fn label_jump(value: &str, cursor: usize, forward: bool) -> usize {
     let chars: Vec<char> = value.chars().collect();
     let cursor = cursor.min(chars.len());
@@ -5086,7 +5106,9 @@ mod tests {
             start_selector: "p[1]".into(),
             start_offset: 0,
             end_selector: "p[1]".into(),
-            end_offset: 5,
+            // Includes the trailing space: the note separator must not be
+            // highlighted.
+            end_offset: 6,
             color: "red".into(),
             note: "my note".into(),
             ..Default::default()
@@ -5099,14 +5121,25 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let expected = crate::ui::theme::dim();
+        let background = crate::ui::theme::bg_base();
+        let annotated = crate::ui::annotation_color("red");
         let mut checked = false;
         for y in 0..buffer.area.height {
             let row: String = (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
                 .collect();
             if let Some(index) = row.find("alpha [my note] beta") {
-                let note = index + "alpha ".len();
+                // `index` is a byte offset; the border is not ASCII.
+                let start = row[..index].chars().count();
+                // The separator space is note text, not highlight.
+                let space = start + "alpha".chars().count();
+                assert_eq!(buffer[(space as u16, y)].fg, expected);
+                assert_eq!(buffer[(space as u16, y)].bg, background);
+                // The highlighted word keeps its color.
+                assert_eq!(buffer[(start as u16, y)].fg, annotated);
+                let note = start + "alpha [my note".chars().count();
                 assert_eq!(buffer[(note as u16, y)].fg, expected);
+                assert_eq!(buffer[(note as u16, y)].bg, background);
                 checked = true;
             }
         }

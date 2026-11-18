@@ -598,8 +598,10 @@ fn styled_line(
     let indent = indent_chars(&wrapped.text, wrapped.indent);
     let chars: Vec<char> = wrapped.text.chars().collect();
     let content = &chars[indent.min(chars.len())..];
-    let note_style =
-        Style::new().fg(theme::dim()).add_modifier(Modifier::ITALIC);
+    let note_style = Style::new()
+        .fg(theme::dim())
+        .bg(theme::bg_base())
+        .add_modifier(Modifier::ITALIC);
 
     let mut boundaries = vec![0usize, content.len()];
     for (from, to, _) in ranges {
