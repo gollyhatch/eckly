@@ -209,34 +209,62 @@ fn draw_highlights(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let width = inner.width.saturating_sub(4) as usize;
+    let width = inner.width.saturating_sub(4).max(8) as usize;
     let items: Vec<ListItem> = app
         .highlights
         .iter()
         .map(|annotation| {
             let color = super::annotation_color(annotation.color());
-            let text = annotation.text.replace('\n', " ");
-            let mut lines = vec![Line::from(vec![
-                Span::styled("▍ ", Style::new().fg(color)),
-                Span::styled(
-                    super::truncate_width(&text, width),
-                    Style::new().fg(theme::text()),
-                ),
-            ])];
-            let mut meta = annotation.bookmark_title.clone();
-            let note = annotation.note.trim();
-            if !note.is_empty() {
-                meta.push_str(&format!(
-                    "  — {}",
-                    super::truncate_width(note, 40)
-                ));
-            }
-            if !meta.is_empty() {
+            let mut lines = Vec::new();
+
+            let title = annotation.bookmark_title.trim();
+            if !title.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    format!("   {meta}"),
-                    Style::new().fg(theme::dim()),
+                    super::truncate_width(title, width),
+                    Style::new().fg(theme::dim()).add_modifier(Modifier::BOLD),
                 )));
             }
+
+            let text = annotation.text.replace('\n', " ");
+            let options = textwrap::Options::new(width)
+                .initial_indent("▍ ")
+                .subsequent_indent("  ")
+                .break_words(true);
+            for (index, wrapped) in
+                textwrap::wrap(&text, options).into_iter().enumerate()
+            {
+                let wrapped = wrapped.into_owned();
+                if index == 0 {
+                    let content = wrapped
+                        .strip_prefix("▍ ")
+                        .unwrap_or(&wrapped)
+                        .to_string();
+                    lines.push(Line::from(vec![
+                        Span::styled("▍ ", Style::new().fg(color)),
+                        Span::styled(content, Style::new().fg(theme::text())),
+                    ]));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        wrapped,
+                        Style::new().fg(theme::text()),
+                    )));
+                }
+            }
+
+            let note = annotation.note.trim().replace('\n', " ");
+            if !note.is_empty() {
+                let options = textwrap::Options::new(width)
+                    .initial_indent("  — ")
+                    .subsequent_indent("    ")
+                    .break_words(true);
+                for wrapped in textwrap::wrap(&note, options) {
+                    lines.push(Line::from(Span::styled(
+                        wrapped.into_owned(),
+                        Style::new().fg(theme::dim()),
+                    )));
+                }
+            }
+
             ListItem::new(lines)
         })
         .collect();

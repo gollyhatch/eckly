@@ -5765,13 +5765,14 @@ mod tests {
 
         let mut app = test_app_with_bookmarks(1);
         app.filter = Filter::Highlights;
+        let text = format!("start {} endmarker", "filler ".repeat(30));
         app.annotation_summaries = Some(HashMap::from([(
             "b1".to_string(),
             vec![Annotation {
                 id: "a1".into(),
                 bookmark_id: "b1".into(),
                 bookmark_title: "The article".into(),
-                text: "a highlighted sentence".into(),
+                text,
                 note: "a note".into(),
                 color: "yellow".into(),
                 ..Default::default()
@@ -5793,11 +5794,24 @@ mod tests {
             })
             .collect();
         assert!(rows.iter().any(|row| row.contains("Highlights 1")));
-        assert!(
-            rows.iter()
-                .any(|row| row.contains("a highlighted sentence"))
-        );
-        assert!(rows.iter().any(|row| row.contains("The article")));
+        let title_row = rows
+            .iter()
+            .position(|row| row.contains("The article"))
+            .unwrap();
+        let first_row = rows
+            .iter()
+            .position(|row| row.contains("▍") && row.contains("start"))
+            .unwrap();
+        assert!(title_row < first_row);
+        let last_row = rows
+            .iter()
+            .position(|row| row.contains("endmarker"))
+            .unwrap();
+        assert!(last_row > first_row);
+        assert!(rows.iter().filter(|row| row.contains("filler")).count() > 1,);
+        let note_row =
+            rows.iter().position(|row| row.contains("a note")).unwrap();
+        assert!(note_row > last_row);
     }
 
     #[test]
