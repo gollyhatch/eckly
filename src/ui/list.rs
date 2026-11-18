@@ -217,7 +217,11 @@ fn draw_highlights(frame: &mut Frame, app: &mut App, area: Rect) {
             let color = super::annotation_color(annotation.color());
             let mut lines = Vec::new();
 
-            let title = annotation.bookmark_title.trim();
+            let title = if annotation.bookmark_title.trim().is_empty() {
+                annotation.bookmark_url.trim()
+            } else {
+                annotation.bookmark_title.trim()
+            };
             if !title.is_empty() {
                 lines.push(Line::from(Span::styled(
                     super::truncate_width(title, width),

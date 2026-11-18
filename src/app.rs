@@ -2387,6 +2387,10 @@ impl App {
             return;
         };
         let bookmark = self.bookmark_for_annotation(&annotation);
+        if bookmark.id.is_empty() {
+            self.toast_error("This highlight has no bookmark");
+            return;
+        }
         self.open_bookmark(bookmark, Some(annotation.id));
     }
 
@@ -2620,13 +2624,29 @@ impl App {
         let Some(reader) = &self.reader else {
             return;
         };
-        let bookmark_id = reader.bookmark.id.clone();
-        let annotations = reader.annotations.clone();
+        let bookmark = reader.bookmark.clone();
+        let mut annotations = reader.annotations.clone();
+        // A bookmark's annotation list does not repeat the bookmark, so fill
+        // in what the library-wide list provides.
+        for annotation in &mut annotations {
+            if annotation.bookmark_id.is_empty() {
+                annotation.bookmark_id = bookmark.id.clone();
+            }
+            if annotation.bookmark_title.is_empty() {
+                annotation.bookmark_title = bookmark.display_title();
+            }
+            if annotation.bookmark_url.is_empty() {
+                annotation.bookmark_url = bookmark.url.clone();
+            }
+            if annotation.bookmark_site_name.is_empty() {
+                annotation.bookmark_site_name = bookmark.host();
+            }
+        }
         if let Some(map) = &mut self.annotation_summaries {
             if annotations.is_empty() {
-                map.remove(&bookmark_id);
+                map.remove(&bookmark.id);
             } else {
-                map.insert(bookmark_id, annotations);
+                map.insert(bookmark.id, annotations);
             }
         }
     }
@@ -5812,6 +5832,74 @@ mod tests {
         let note_row =
             rows.iter().position(|row| row.contains("a note")).unwrap();
         assert!(note_row > last_row);
+    }
+
+    #[test]
+    fn reader_annotations_keep_bookmark_metadata_in_highlights() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let dir = std::env::temp_dir()
+            .join(format!("eckly-summaries-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cache = Cache::new(dir.clone());
+        let bookmark = Bookmark {
+            id: "b1".into(),
+            title: Some("Article".into()),
+            url: "https://example.com/1".into(),
+            site_name: Some("Example".into()),
+            has_article: true,
+            ..Default::default()
+        };
+        cache.upsert_bookmarks(std::slice::from_ref(&bookmark));
+        cache
+            .write_article("b1", "<p>first</p><p>second paragraph</p>")
+            .unwrap();
+        // A bookmark's own annotation list omits the bookmark fields.
+        let annotation = Annotation {
+            id: "a1".into(),
+            start_selector: "p[2]".into(),
+            start_offset: 0,
+            end_selector: "p[2]".into(),
+            end_offset: 6,
+            text: "second".into(),
+            color: "yellow".into(),
+            ..Default::default()
+        };
+        cache.set_annotations("b1", vec![annotation.clone()]);
+
+        let mut app = App::with_cache(
+            Config::default(),
+            PathBuf::from("/tmp/eckly-test"),
+            tx,
+            Some(cache),
+            true,
+        );
+        app.screen = Screen::Main;
+
+        let mut reader = Reader::new(bookmark, false, 0, false);
+        reader.annotations = vec![annotation];
+        app.reader = Some(reader);
+        app.annotation_summaries = Some(HashMap::new());
+        app.store_annotation_summaries();
+
+        let stored = &app.annotation_summaries.as_ref().unwrap()["b1"];
+        assert_eq!(stored[0].bookmark_id, "b1");
+        assert_eq!(stored[0].bookmark_title, "Article");
+        assert_eq!(stored[0].bookmark_url, "https://example.com/1");
+        assert_eq!(stored[0].bookmark_site_name, "Example");
+
+        app.reader = None;
+        app.filter = Filter::Highlights;
+        app.rebuild_highlights();
+        assert_eq!(app.highlights.len(), 1);
+        assert_eq!(app.highlights[0].bookmark_title, "Article");
+        app.list_state.select(Some(0));
+
+        app.open_selected_highlight();
+        let reader = app.reader.as_ref().unwrap();
+        assert_eq!(reader.bookmark.id, "b1");
+        assert!(reader.error.is_none());
+        assert!(!reader.lines.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
