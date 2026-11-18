@@ -234,6 +234,13 @@ impl Cache {
             .unwrap_or_default()
     }
 
+    pub fn annotations_ref(
+        &self,
+        bookmark_id: &str,
+    ) -> Option<&Vec<Annotation>> {
+        self.state.annotations.get(bookmark_id)
+    }
+
     pub fn set_annotations(
         &mut self,
         bookmark_id: &str,

@@ -61,6 +61,7 @@ pub enum ApiEvent {
         id: String,
         result: Result<(), ApiError>,
     },
+    AnnotationSummaries(Result<Vec<crate::models::Annotation>, ApiError>),
     Image {
         bookmark_id: String,
         url: String,

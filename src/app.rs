@@ -1036,6 +1036,8 @@ pub struct App {
     pub offline_mode: bool,
 
     cache: Option<Cache>,
+    /// Library annotations by bookmark, for the bookmark list.
+    annotation_summaries: Option<HashMap<String, Vec<Annotation>>>,
     tx: UnboundedSender<Event>,
     list_seq: u64,
     pending_select: Option<String>,
@@ -1098,6 +1100,7 @@ impl App {
             offline: offline_mode,
             offline_mode,
             cache,
+            annotation_summaries: None,
             tx,
             list_seq: 0,
             pending_select: None,
@@ -1185,6 +1188,7 @@ impl App {
         self.request_bookmarks(false, false);
         self.request_labels();
         self.request_collections();
+        self.request_annotation_summaries();
         if self.profile.is_none() && !self.profile_denied {
             self.request_profile();
         }
@@ -2184,6 +2188,55 @@ impl App {
         });
     }
 
+    fn request_annotation_summaries(&mut self) {
+        if self.offline_mode || self.offline {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let mut annotations = Vec::new();
+            let mut offset = 0;
+            loop {
+                match client.annotations_page(100, offset).await {
+                    Ok(page) => {
+                        if page.items.is_empty() {
+                            break;
+                        }
+                        let count = page.items.len();
+                        annotations.extend(page.items);
+                        offset += count;
+                        if offset >= page.total {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Event::api(
+                            ApiEvent::AnnotationSummaries(Err(err)),
+                        ));
+                        return;
+                    }
+                }
+            }
+            let _ = tx.send(Event::api(ApiEvent::AnnotationSummaries(Ok(
+                annotations,
+            ))));
+        });
+    }
+
+    pub fn annotations_for(&self, bookmark_id: &str) -> &[Annotation] {
+        if let Some(map) = &self.annotation_summaries {
+            return map.get(bookmark_id).map(Vec::as_slice).unwrap_or(&[]);
+        }
+        self.cache
+            .as_ref()
+            .and_then(|cache| cache.annotations_ref(bookmark_id))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     fn request_collections(&mut self) {
         let Some(client) = self.client.clone() else {
             return;
@@ -2375,6 +2428,21 @@ impl App {
                 result,
             }));
         });
+    }
+
+    fn store_annotation_summaries(&mut self) {
+        let Some(reader) = &self.reader else {
+            return;
+        };
+        let bookmark_id = reader.bookmark.id.clone();
+        let annotations = reader.annotations.clone();
+        if let Some(map) = &mut self.annotation_summaries {
+            if annotations.is_empty() {
+                map.remove(&bookmark_id);
+            } else {
+                map.insert(bookmark_id, annotations);
+            }
+        }
     }
 
     fn store_reader_annotations(&mut self) {
@@ -3555,6 +3623,7 @@ impl App {
         self.request_bookmarks(false, true);
         self.request_labels();
         self.request_collections();
+        self.request_annotation_summaries();
         if !self.profile_denied {
             self.request_profile();
         }
@@ -3910,6 +3979,7 @@ impl App {
                             reader.annotations = annotations;
                         }
                         self.store_reader_annotations();
+                        self.store_annotation_summaries();
                     }
                     Err(err) => {
                         if !self.handle_unauthorized(&err) {
@@ -3931,6 +4001,7 @@ impl App {
                         }
                     }
                     self.store_reader_annotations();
+                    self.store_annotation_summaries();
                     self.toast_success("Annotation added");
                 }
                 Err(err) => {
@@ -3967,6 +4038,7 @@ impl App {
                         }
                     }
                     self.store_reader_annotations();
+                    self.store_annotation_summaries();
                     self.toast_success("Annotation updated");
                 }
                 Err(err) => {
@@ -3975,6 +4047,24 @@ impl App {
                             "Could not update the annotation: {err}"
                         ));
                     }
+                }
+            },
+            ApiEvent::AnnotationSummaries(result) => match result {
+                Ok(annotations) => {
+                    let mut summaries: HashMap<String, Vec<Annotation>> =
+                        HashMap::new();
+                    for annotation in annotations {
+                        if !annotation.bookmark_id.is_empty() {
+                            summaries
+                                .entry(annotation.bookmark_id.clone())
+                                .or_default()
+                                .push(annotation);
+                        }
+                    }
+                    self.annotation_summaries = Some(summaries);
+                }
+                Err(err) => {
+                    let _ = self.handle_unauthorized(&err);
                 }
             },
             ApiEvent::AnnotationDeleted {
@@ -3991,6 +4081,7 @@ impl App {
                         }
                     }
                     self.store_reader_annotations();
+                    self.store_annotation_summaries();
                     self.toast_success("Annotation deleted");
                 }
                 Err(err) => {
@@ -5431,6 +5522,64 @@ mod tests {
             }
         }
         assert!(checked, "article text was not rendered");
+    }
+
+    #[test]
+    fn bookmark_list_shows_annotations() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app_with_bookmarks(1);
+        app.bookmarks[0].title = Some("Article".into());
+        app.annotation_summaries = Some(HashMap::from([(
+            "bookmark-0".to_string(),
+            vec![
+                Annotation {
+                    id: "a1".into(),
+                    text: "first highlight".into(),
+                    color: "red".into(),
+                    ..Default::default()
+                },
+                Annotation {
+                    id: "a2".into(),
+                    text: "second highlight".into(),
+                    color: "green".into(),
+                    ..Default::default()
+                },
+            ],
+        )]));
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        assert!(rows.iter().any(|row| row.contains("first highlight")));
+        assert!(rows.iter().any(|row| row.contains("second highlight")));
+        assert!(rows.iter().any(|row| row.contains("2 annotations")));
+
+        // Without annotations there is no count.
+        app.annotation_summaries = Some(HashMap::new());
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        assert!(!rows.iter().any(|row| row.contains("annotation")));
     }
 
     #[test]

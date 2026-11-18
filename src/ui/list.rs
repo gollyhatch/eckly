@@ -111,13 +111,48 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     .push(Span::styled(" ✎", Style::new().fg(theme::purple())));
             }
 
-            let meta = super::bookmark_meta(bookmark);
-            let second = Line::from(Span::styled(
-                format!("    {meta}"),
-                Style::new().fg(theme::dim()),
-            ));
+            let annotations = app.annotations_for(&bookmark.id);
+            let mut meta = super::bookmark_meta(bookmark);
+            if !annotations.is_empty() {
+                meta.push_str(&format!(
+                    " · {} annotation{}",
+                    annotations.len(),
+                    if annotations.len() == 1 { "" } else { "s" }
+                ));
+            }
+            let mut lines = vec![
+                Line::from(first),
+                Line::from(Span::styled(
+                    format!("    {meta}"),
+                    Style::new().fg(theme::dim()),
+                )),
+            ];
+            let width = inner.width.saturating_sub(8) as usize;
+            for annotation in annotations {
+                let text = annotation.text.trim();
+                let text = if text.is_empty() {
+                    annotation.note.trim()
+                } else {
+                    text
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                lines.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(
+                        "▍ ",
+                        Style::new()
+                            .fg(super::annotation_color(annotation.color())),
+                    ),
+                    Span::styled(
+                        super::truncate_width(&text.replace('\n', " "), width),
+                        Style::new().fg(theme::dim()),
+                    ),
+                ]));
+            }
 
-            ListItem::new(vec![Line::from(first), second])
+            ListItem::new(lines)
         })
         .collect();
 
