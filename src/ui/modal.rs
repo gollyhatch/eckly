@@ -66,6 +66,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         binding("PgUp/PgDn", "Page up / down"),
         binding("Ctrl+d/u", "Half page down / up"),
         binding("Tab", "Focus filters"),
+        binding("L", "Hide / show Library"),
         binding("Enter", "Open / apply"),
         binding("R", "Rename label"),
         binding("Esc", "Back / close"),
