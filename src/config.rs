@@ -31,6 +31,9 @@ pub struct Config {
     /// Speed reading pace in words per minute.
     #[serde(default = "default_speed_read_wpm")]
     pub speed_read_wpm: u16,
+    /// Archiving from the reader returns to the bookmark list.
+    #[serde(default)]
+    pub archive_closes_reader: bool,
 }
 
 fn default_text_align() -> String {
@@ -56,6 +59,7 @@ impl Default for Config {
             text_width: 0,
             text_align: default_text_align(),
             speed_read_wpm: default_speed_read_wpm(),
+            archive_closes_reader: false,
         }
     }
 }
@@ -217,6 +221,15 @@ mod tests {
         assert!(normalize_url("   ").is_err());
         assert!(normalize_url("ftp://example.com").is_err());
         assert!(normalize_url("https://").is_err());
+    }
+
+    #[test]
+    fn archive_closes_reader_defaults_to_off() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(!config.archive_closes_reader);
+        let config: Config =
+            toml::from_str("archive_closes_reader = true").unwrap();
+        assert!(config.archive_closes_reader);
     }
 
     #[test]
