@@ -22,6 +22,7 @@ order; press `Enter` to jump to one:
 
 - **Browse** the inbox (all non-archived bookmarks, including finished ones),
   reading progress, favorites and archives, or filter by label or collection.
+  Press `L` to hide the Library pane and give the list the full width.
 - **Search** your library with Readeck's full-text search, or search within the
   current article with highlighted matches.
 - **Annotate** paragraphs with colored highlights and notes. The Library pane
@@ -249,6 +250,7 @@ first.
 | `g` / `G` | First / last bookmark |
 | `Enter` / `l` / `→` | Open the reader |
 | `Tab` / `h` / `←` | Focus the filter sidebar |
+| `L` | Hide / show the Library pane |
 | `Esc` | Clear search, then selection; otherwise focus the Library panel |
 | `m` | Toggle read / unread |
 | `f` | Toggle favorite |
@@ -263,6 +265,9 @@ first.
 | `n` | Save a new link |
 | `r` | Refresh bookmarks, labels, collections and profile |
 | `q` | Quit |
+
+While the Library pane is hidden, the list title shows the active filter, and
+`Tab`, `h`, `←` and `Esc` don't move focus. Press `L` to show the pane again.
 
 ### Search filters
 
@@ -300,6 +305,7 @@ field terms are server-side only, so offline they are matched as plain text.
 | `Enter` / `l` / `→` | Apply the selected filter |
 | `Tab` | Return to the bookmark list |
 | `Esc` / `h` / `←` | Clear the library filter, then return |
+| `L` | Hide the Library pane and return to the bookmark list |
 
 While the library filter is active, type to narrow the list, use `↑`/`↓` to
 choose a result, and press `Enter` to apply it. `Esc` clears the filter.

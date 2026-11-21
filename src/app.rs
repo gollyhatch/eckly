@@ -1051,6 +1051,7 @@ pub struct App {
     pub sidebar_viewport: usize,
     pub sidebar_search: TextInput,
     pub sidebar_search_active: bool,
+    pub sidebar_hidden: bool,
     pub filter: Filter,
     pub search: String,
     pub sort: Sort,
@@ -1121,6 +1122,7 @@ impl App {
             sidebar_viewport: 10,
             sidebar_search: TextInput::new(""),
             sidebar_search_active: false,
+            sidebar_hidden: false,
             filter: Filter::Unread,
             search: String::new(),
             sort: Sort::Newest,
@@ -1933,11 +1935,33 @@ impl App {
             }
             KeyCode::Char('r') => self.refresh_all(),
             KeyCode::Char('R') => self.rename_selected_label(),
+            KeyCode::Char('L') => self.toggle_sidebar(),
             KeyCode::Char('/') => {
                 self.sidebar_search_active = true;
                 self.sidebar_search.cursor = self.sidebar_search.char_len();
             }
             _ => {}
+        }
+    }
+
+    fn focus_sidebar(&mut self) {
+        if self.sidebar_hidden {
+            return;
+        }
+        self.focus = Focus::Sidebar;
+        if !self.sidebar_items.is_empty()
+            && self.sidebar_state.selected().is_none()
+        {
+            self.sidebar_select_edge(true);
+        }
+    }
+
+    fn toggle_sidebar(&mut self) {
+        self.sidebar_hidden = !self.sidebar_hidden;
+        if self.sidebar_hidden {
+            self.focus = Focus::List;
+        } else {
+            self.focus_sidebar();
         }
     }
 
@@ -1964,10 +1988,11 @@ impl App {
         if self.filter == Filter::Highlights {
             match key.code {
                 KeyCode::Char('q') => self.quit = true,
+                KeyCode::Char('L') => self.toggle_sidebar(),
                 KeyCode::Esc
                 | KeyCode::Tab
                 | KeyCode::Char('h')
-                | KeyCode::Left => self.focus = Focus::Sidebar,
+                | KeyCode::Left => self.focus_sidebar(),
                 KeyCode::Down | KeyCode::Char('j') => self.list_move(1),
                 KeyCode::Up | KeyCode::Char('k') => self.list_move(-1),
                 KeyCode::PageDown => {
@@ -1996,6 +2021,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('L') => self.toggle_sidebar(),
             KeyCode::Esc => {
                 if !self.search.is_empty() {
                     self.search.clear();
@@ -2006,21 +2032,11 @@ impl App {
                     self.selected_ids.clear();
                     self.toast_info("Selection cleared");
                 } else {
-                    self.focus = Focus::Sidebar;
-                    if !self.sidebar_items.is_empty()
-                        && self.sidebar_state.selected().is_none()
-                    {
-                        self.sidebar_select_edge(true);
-                    }
+                    self.focus_sidebar();
                 }
             }
             KeyCode::Tab | KeyCode::Char('h') | KeyCode::Left => {
-                self.focus = Focus::Sidebar;
-                if !self.sidebar_items.is_empty()
-                    && self.sidebar_state.selected().is_none()
-                {
-                    self.sidebar_select_edge(true);
-                }
+                self.focus_sidebar()
             }
             KeyCode::Down | KeyCode::Char('j') => self.list_move(1),
             KeyCode::Up | KeyCode::Char('k') => self.list_move(-1),
@@ -5610,6 +5626,170 @@ mod tests {
         // Left border, the " / " prompt, then the four typed characters.
         let position = terminal.backend_mut().get_cursor_position().unwrap();
         assert_eq!((position.x, position.y), (8, 1));
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        let modifiers = match code {
+            KeyCode::Char(c) if c.is_ascii_uppercase() => KeyModifiers::SHIFT,
+            _ => KeyModifiers::NONE,
+        };
+        app.handle_key(KeyEvent::new(code, modifiers));
+    }
+
+    #[test]
+    fn shift_l_toggles_the_library_pane() {
+        let mut app = test_app_with_bookmarks(3);
+        assert!(!app.sidebar_hidden);
+
+        press(&mut app, KeyCode::Char('L'));
+        assert!(app.sidebar_hidden);
+
+        press(&mut app, KeyCode::Char('L'));
+        assert!(!app.sidebar_hidden);
+    }
+
+    /// Draws the app on a 60x12 test terminal and returns its rows as text.
+    fn render_rows(app: &mut App) -> Vec<String> {
+        render_rows_at(app, 60, 12)
+    }
+
+    fn render_rows_at(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hidden_library_pane_gives_the_list_the_full_width() {
+        let mut app = test_app_with_bookmarks(3);
+        let shown = render_rows(&mut app);
+        assert!(shown[0].contains("Library"), "{shown:#?}");
+
+        press(&mut app, KeyCode::Char('L'));
+        let hidden = render_rows(&mut app);
+
+        assert!(!hidden.iter().any(|row| row.contains("Library")));
+        // One box spans the row: the list's corners sit at both edges.
+        let top = &hidden[0];
+        assert!(top.starts_with('┌') && top.ends_with('┐'), "{hidden:#?}");
+        assert_eq!(top.matches('┌').count(), 1, "{hidden:#?}");
+    }
+
+    #[test]
+    fn hiding_the_focused_library_pane_focuses_the_list() {
+        let mut app = test_app_with_bookmarks(3);
+        app.focus = Focus::Sidebar;
+
+        press(&mut app, KeyCode::Char('L'));
+
+        assert!(app.sidebar_hidden);
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn keys_that_focus_the_library_pane_do_nothing_while_it_is_hidden() {
+        for filter in [Filter::All, Filter::Highlights] {
+            for code in [
+                KeyCode::Tab,
+                KeyCode::Char('h'),
+                KeyCode::Left,
+                KeyCode::Esc,
+            ] {
+                let mut app = test_app_with_bookmarks(3);
+                app.filter = filter.clone();
+                press(&mut app, KeyCode::Char('L'));
+
+                press(&mut app, code);
+
+                assert!(app.sidebar_hidden, "{filter:?} {code:?}");
+                assert_eq!(app.focus, Focus::List, "{filter:?} {code:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_library_pane_stays_hidden_after_reading() {
+        let mut app = test_app_with_bookmarks(3);
+        press(&mut app, KeyCode::Char('L'));
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.reader.is_some());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.reader.is_none());
+
+        assert!(app.sidebar_hidden);
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn shift_l_is_text_in_the_library_filter() {
+        let mut app = test_app_with_bookmarks(3);
+        app.focus = Focus::Sidebar;
+        press(&mut app, KeyCode::Char('/'));
+
+        press(&mut app, KeyCode::Char('L'));
+
+        assert_eq!(app.sidebar_search.value, "L");
+        assert!(!app.sidebar_hidden);
+        assert_eq!(app.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn hidden_library_pane_puts_the_filter_in_the_list_title() {
+        let mut app = test_app_with_bookmarks(3);
+        app.filter = Filter::Archived;
+        let shown = render_rows(&mut app);
+        assert!(shown[0].contains("Bookmarks 3"), "{shown:#?}");
+
+        press(&mut app, KeyCode::Char('L'));
+        let hidden = render_rows(&mut app);
+
+        assert!(hidden[0].contains("Archived 3"), "{hidden:#?}");
+        assert!(!hidden[0].contains("Bookmarks"), "{hidden:#?}");
+    }
+
+    #[test]
+    fn showing_the_library_pane_focuses_it() {
+        let mut app = test_app_with_bookmarks(3);
+        app.rebuild_sidebar();
+        app.sidebar_state.select(None);
+        press(&mut app, KeyCode::Char('L'));
+
+        press(&mut app, KeyCode::Char('L'));
+
+        assert!(!app.sidebar_hidden);
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert_eq!(app.sidebar_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn footer_hints_name_l_while_the_library_pane_is_hidden() {
+        for filter in [Filter::All, Filter::Highlights] {
+            let mut app = test_app_with_bookmarks(3);
+            app.filter = filter.clone();
+            let shown = render_rows_at(&mut app, 160, 12);
+            let footer = shown.last().unwrap();
+            assert!(footer.contains("Tab filters"), "{filter:?} {footer}");
+            assert!(!footer.contains("L library"), "{filter:?} {footer}");
+
+            press(&mut app, KeyCode::Char('L'));
+            let hidden = render_rows_at(&mut app, 160, 12);
+            let footer = hidden.last().unwrap();
+
+            assert!(footer.contains("L library"), "{filter:?} {footer}");
+            assert!(!footer.contains("Tab filters"), "{filter:?} {footer}");
+        }
     }
 
     #[test]

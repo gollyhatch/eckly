@@ -51,14 +51,20 @@ fn draw_main(frame: &mut Frame, app: &mut App) {
 
     draw_footer(frame, app, footer_area);
 
-    let sidebar_width = sidebar_width(app, body_area.width);
+    let sidebar_width = if app.sidebar_hidden {
+        0
+    } else {
+        sidebar_width(app, body_area.width)
+    };
     let [sidebar_area, list_area] = Layout::horizontal([
         Constraint::Length(sidebar_width),
         Constraint::Min(16),
     ])
     .areas(body_area);
 
-    sidebar::draw(frame, app, sidebar_area);
+    if !app.sidebar_hidden {
+        sidebar::draw(frame, app, sidebar_area);
+    }
     list::draw(frame, app, list_area);
 }
 
@@ -100,15 +106,20 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         status_right,
     );
 
+    let pane = if app.sidebar_hidden {
+        "L library"
+    } else {
+        "Tab filters"
+    };
     let hints = match app.focus {
         crate::app::Focus::Sidebar => {
-            "  j/k move · / filter · Enter apply · R rename label · PgUp/PgDn page · Ctrl+d/u · Tab/Esc back · ? help"
+            "  j/k move · / filter · Enter apply · R rename label · PgUp/PgDn page · Ctrl+d/u · Tab/Esc back · ? help".to_string()
         }
         crate::app::Focus::List => {
             if app.filter == crate::models::Filter::Highlights {
-                "  j/k move · Enter open · D delete highlight · PgUp/PgDn page · r refresh · Tab filters · ? help"
+                format!("  j/k move · Enter open · D delete highlight · PgUp/PgDn page · r refresh · {pane} · ? help")
             } else {
-                "  j/k move · Space select · Enter read · m read · f favorite · a archive · t labels · / search · n add · Tab filters · ? help"
+                format!("  j/k move · Space select · Enter read · m read · f favorite · a archive · t labels · / search · n add · {pane} · ? help")
             }
         }
     };
@@ -120,7 +131,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     .areas(hints_area);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            truncate_width(hints, hints_left.width as usize),
+            truncate_width(&hints, hints_left.width as usize),
             Style::new().fg(theme::faint()),
         )))
         .style(Style::new().bg(theme::bg_bar())),
