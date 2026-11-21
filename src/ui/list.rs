@@ -19,9 +19,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         theme::border()
     };
+    let name = if app.sidebar_hidden {
+        app.filter.title()
+    } else {
+        "Bookmarks".into()
+    };
     let mut title_spans = vec![
         Span::styled(
-            " Bookmarks ",
+            format!(" {name} "),
             Style::new()
                 .fg(theme::accent())
                 .add_modifier(Modifier::BOLD),
