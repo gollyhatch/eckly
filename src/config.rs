@@ -15,6 +15,9 @@ pub struct Config {
     pub server: String,
     #[serde(default)]
     pub token: String,
+    /// Browser executable used for opening bookmarks; empty uses the system opener.
+    #[serde(default)]
+    pub browser: String,
     #[serde(default)]
     pub theme: String,
     #[serde(default = "default_images")]
@@ -47,6 +50,7 @@ impl Default for Config {
         Self {
             server: String::new(),
             token: String::new(),
+            browser: String::new(),
             theme: String::new(),
             images: true,
             text_width: 0,
@@ -189,6 +193,15 @@ mod tests {
         assert_eq!(config.speed_read_wpm, 300);
         let config: Config = toml::from_str("speed_read_wpm = 450").unwrap();
         assert_eq!(config.speed_read_wpm, 450);
+    }
+
+    #[test]
+    fn browser_is_optional() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.browser.is_empty());
+
+        let config: Config = toml::from_str("browser = \"firefox\"").unwrap();
+        assert_eq!(config.browser, "firefox");
     }
 
     #[test]

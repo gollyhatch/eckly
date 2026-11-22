@@ -82,12 +82,18 @@ parsed aborts startup with an error instead of showing the setup screen.
 ```toml
 server = "https://readeck.example.com"
 token = "your-api-token"
+browser = "firefox"
 theme = "catppuccin-mocha"
 images = true
 text_width = 100
 text_align = "center"
 speed_read_wpm = 300
 ```
+
+`browser` names the executable used by `o` to open a bookmark. When empty (the
+default), eckly uses the system opener (`xdg-open` on Linux). Set it to a
+browser name or absolute path; use a wrapper script if you need arguments.
+This setting only affects opening links, not OAuth login URLs.
 
 `images` controls whether inline article images are rendered; it defaults to
 `true`. Pressing `i` in the reader toggles images for the current session.

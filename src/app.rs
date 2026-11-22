@@ -3460,7 +3460,7 @@ impl App {
             self.toast_error("This bookmark has no URL.");
             return;
         }
-        if let Err(err) = open::that(&bookmark.url) {
+        if let Err(err) = open_url(&self.config.browser, &bookmark.url) {
             self.toast_error(format!("Could not open browser: {err}"));
         }
     }
@@ -5111,6 +5111,16 @@ fn selector_position(selector: &str) -> Option<Vec<(String, usize)>> {
         position.push((part[..open].to_string(), index));
     }
     Some(position)
+}
+
+/// Open `url` with the configured browser, or the system opener when unset.
+fn open_url(browser: &str, url: &str) -> std::io::Result<()> {
+    let browser = browser.trim();
+    if browser.is_empty() {
+        open::that(url)
+    } else {
+        open::with(url, browser)
+    }
 }
 
 fn fallback_article(bookmark: &Bookmark) -> Article {
@@ -7124,5 +7134,41 @@ mod tests {
             KeyModifiers::CONTROL,
         ));
         assert_eq!(app.reader.as_ref().unwrap().scroll, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opens_urls_with_the_configured_browser() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir();
+        let script = dir.join(format!("eckly-browser-{unique}.sh"));
+        let captured = dir.join(format!("eckly-browser-{unique}.txt"));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", captured.display()),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        open_url(script.to_str().unwrap(), "https://example.com/article")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&captured).unwrap(),
+            "https://example.com/article"
+        );
+
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&captured);
     }
 }
