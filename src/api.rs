@@ -445,12 +445,17 @@ impl ReadeckClient {
     pub async fn create_bookmark(
         &self,
         url: &str,
+        title: Option<&str>,
     ) -> Result<Option<String>, ApiError> {
+        let mut payload = serde_json::json!({ "url": url });
+        if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+            payload["title"] = serde_json::Value::String(title.to_string());
+        }
         let response = self
             .http
             .post(self.endpoint("/bookmarks"))
             .bearer_auth(self.token.as_ref())
-            .json(&serde_json::json!({ "url": url }))
+            .json(&payload)
             .send()
             .await?;
 
@@ -853,6 +858,40 @@ mod tests {
         assert!(request.starts_with("PATCH /api/bookmarks/one "));
         assert!(request.contains("\"is_marked\":true"));
         assert!(request.contains("\"labels\":[\"later\"]"));
+    }
+
+    #[tokio::test]
+    async fn creates_bookmarks_with_an_optional_title() {
+        let (base, server) = serve_once(
+            response("201 Created", "Bookmark-Id: bm-1\r\n", ""),
+            true,
+        )
+        .await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        let id = client
+            .create_bookmark("https://example.com/article", Some("Title"))
+            .await
+            .unwrap();
+        assert_eq!(id.as_deref(), Some("bm-1"));
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /api/bookmarks "));
+        assert!(request.contains("\"url\":\"https://example.com/article\""));
+        assert!(request.contains("\"title\":\"Title\""));
+
+        let (base, server) = serve_once(
+            response("201 Created", "Bookmark-Id: bm-2\r\n", ""),
+            true,
+        )
+        .await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        let id = client
+            .create_bookmark("https://example.com/untitled", None)
+            .await
+            .unwrap();
+        assert_eq!(id.as_deref(), Some("bm-2"));
+        let request = server.await.unwrap();
+        assert!(request.contains("\"url\":\"https://example.com/untitled\""));
+        assert!(!request.contains("\"title\""));
     }
 
     #[tokio::test]

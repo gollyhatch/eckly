@@ -1,3 +1,4 @@
+mod add;
 mod api;
 mod app;
 mod article;
@@ -65,6 +66,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Add a bookmark for a URL and exit
+    Add(add::AddArgs),
+
     /// Sync the local cache for offline reading (changed bookmarks by default)
     Sync(sync::SyncArgs),
 }
@@ -100,8 +104,18 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("eckly");
 
-    if let Some(Commands::Sync(args)) = cli.command {
-        return sync::run(&config, &args, cache_dir).await;
+    if let Some(command) = cli.command {
+        return match command {
+            Commands::Add(args) => {
+                if cli.offline {
+                    bail!(
+                        "add requires a connection to Readeck; --offline is not supported"
+                    );
+                }
+                add::run(&config, &args).await
+            }
+            Commands::Sync(args) => sync::run(&config, &args, cache_dir).await,
+        };
     }
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {

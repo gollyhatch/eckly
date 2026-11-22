@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::api::{ApiError, OAuthDevice, OAuthPoll, ReadeckClient};
 use crate::article::{Article, parse_article};
 use crate::cache::Cache;
-use crate::config::{Config, normalize_server};
+use crate::config::{Config, normalize_server, normalize_url};
 use crate::event::{ApiEvent, Event, PendingSyncResult};
 use crate::input::TextInput;
 use crate::models::{
@@ -3838,7 +3838,7 @@ impl App {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let _ = tx.send(Event::api(ApiEvent::Created(
-                client.create_bookmark(&url).await,
+                client.create_bookmark(&url, None).await,
             )));
         });
         self.toast_info("Saving bookmark…");
@@ -5093,25 +5093,6 @@ fn parse_labels(value: &str) -> Vec<String> {
     labels
 }
 
-pub fn normalize_url(input: &str) -> Result<String, String> {
-    let mut value = input.trim().to_string();
-    if value.is_empty() {
-        return Err("A URL is required.".into());
-    }
-    if !value.contains("://") {
-        value = format!("https://{value}");
-    }
-    let parsed =
-        url::Url::parse(&value).map_err(|_| format!("Invalid URL: {input}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("Only http and https URLs can be saved.".into());
-    }
-    if parsed.host_str().is_none() {
-        return Err("The URL has no host.".into());
-    }
-    Ok(value)
-}
-
 /// Position of an annotation selector in the article: `p[2]` or
 /// `section[1]/ul[1]/li[3]`. `None` for an empty or malformed selector.
 fn selector_position(selector: &str) -> Option<Vec<(String, usize)>> {
@@ -5259,21 +5240,6 @@ fn article_error(err: &ApiError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalizes_urls() {
-        assert_eq!(
-            normalize_url("example.com/article").unwrap(),
-            "https://example.com/article"
-        );
-        assert_eq!(
-            normalize_url("http://example.com").unwrap(),
-            "http://example.com"
-        );
-        assert!(normalize_url("   ").is_err());
-        assert!(normalize_url("ftp://example.com").is_err());
-        assert!(normalize_url("https://").is_err());
-    }
 
     #[test]
     fn parses_label_lists() {

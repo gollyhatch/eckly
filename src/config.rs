@@ -142,6 +142,29 @@ pub fn normalize_server(input: &str) -> Result<String> {
     Ok(normalized)
 }
 
+/// Normalize a user supplied bookmark URL.
+///
+/// Adds `https://` when no scheme is present, then accepts only absolute
+/// `http`/`https` URLs with a host.
+pub fn normalize_url(input: &str) -> Result<String, String> {
+    let mut value = input.trim().to_string();
+    if value.is_empty() {
+        return Err("A URL is required.".into());
+    }
+    if !value.contains("://") {
+        value = format!("https://{value}");
+    }
+    let parsed =
+        url::Url::parse(&value).map_err(|_| format!("Invalid URL: {input}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only http and https URLs can be saved.".into());
+    }
+    if parsed.host_str().is_none() {
+        return Err("The URL has no host.".into());
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +189,21 @@ mod tests {
         assert_eq!(config.speed_read_wpm, 300);
         let config: Config = toml::from_str("speed_read_wpm = 450").unwrap();
         assert_eq!(config.speed_read_wpm, 450);
+    }
+
+    #[test]
+    fn normalizes_urls() {
+        assert_eq!(
+            normalize_url("example.com/article").unwrap(),
+            "https://example.com/article"
+        );
+        assert_eq!(
+            normalize_url("http://example.com").unwrap(),
+            "http://example.com"
+        );
+        assert!(normalize_url("   ").is_err());
+        assert!(normalize_url("ftp://example.com").is_err());
+        assert!(normalize_url("https://").is_err());
     }
 
     #[test]

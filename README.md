@@ -187,6 +187,19 @@ articles. Bookmark changes are queued locally and synced on the next online
 launch. `r` reloads the cache from disk, which is useful after running
 `eckly sync` in another terminal.
 
+### Save a bookmark
+
+The `add` subcommand saves a URL without starting the TUI:
+
+```sh
+eckly add https://example.com/article
+eckly add https://example.com/article "A better title"
+```
+
+The title is optional; Readeck extracts one from the page when it is omitted.
+The command uses the same config file, `--server`/`--token`, or environment
+variables as the TUI, and prints the new bookmark ID.
+
 ### Sync for offline reading
 
 The `sync` subcommand downloads bookmark metadata, article HTML and
