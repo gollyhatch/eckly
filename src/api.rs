@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,9 @@ pub enum ApiError {
 
     #[error("Could not parse the server response: {0}")]
     Decode(#[from] serde_json::Error),
+
+    #[error("Could not parse the sync response: {0}")]
+    Sync(String),
 
     #[error("This bookmark has no readable article.")]
     NoArticle,
@@ -82,6 +86,43 @@ impl ApiError {
     pub fn is_network(&self) -> bool {
         matches!(self, Self::Request(_))
     }
+}
+
+/// Options for `POST /bookmarks/sync`.
+#[derive(Debug, Clone)]
+pub struct SyncOptions {
+    pub with_json: bool,
+    pub with_html: bool,
+    pub with_markdown: bool,
+    pub with_resources: bool,
+    pub resource_prefix: String,
+}
+
+impl Default for SyncOptions {
+    fn default() -> Self {
+        Self {
+            with_json: true,
+            with_html: false,
+            with_markdown: false,
+            with_resources: false,
+            resource_prefix: ".".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncResource {
+    pub path: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SyncItem {
+    pub id: String,
+    pub bookmark: Option<Bookmark>,
+    pub html: Option<String>,
+    pub markdown: Option<String>,
+    pub resources: Vec<SyncResource>,
 }
 
 /// Async client for the Readeck HTTP API.
@@ -272,18 +313,6 @@ impl ReadeckClient {
         })
     }
 
-    /// Metadata for a single bookmark.
-    pub async fn bookmark(&self, id: &str) -> Result<Bookmark, ApiError> {
-        let response = self
-            .send_ok(
-                self.http
-                    .get(self.endpoint(&format!("/bookmarks/{id}")))
-                    .bearer_auth(self.token.as_ref()),
-            )
-            .await?;
-        Ok(response.json::<Bookmark>().await?)
-    }
-
     /// The server's change log: bookmarks updated or deleted since a time.
     ///
     /// Without `since` the endpoint lists every bookmark as an update and
@@ -314,6 +343,103 @@ impl ReadeckClient {
             .map(|value| value.with_timezone(&Utc));
         let changes = response.json::<Vec<SyncChange>>().await?;
         Ok((changes, time))
+    }
+
+    /// Fetch metadata and/or content for specific bookmarks from the sync
+    /// endpoint. The response is a `multipart/mixed` stream.
+    pub async fn sync_bookmarks(
+        &self,
+        ids: &[String],
+        options: &SyncOptions,
+    ) -> Result<Vec<SyncItem>, ApiError> {
+        let payload = serde_json::json!({
+            "id": ids,
+            "with_json": options.with_json,
+            "with_html": options.with_html,
+            "with_markdown": options.with_markdown,
+            "with_resources": options.with_resources,
+            "resource_prefix": options.resource_prefix,
+        });
+        let response = self
+            .http
+            .post(self.endpoint("/bookmarks/sync"))
+            .bearer_auth(self.token.as_ref())
+            .timeout(Duration::from_secs(600))
+            .json(&payload)
+            .send()
+            .await?;
+        let response = ensure_ok(response).await?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                ApiError::Sync("response has no content type".into())
+            })?
+            .to_string();
+        let boundary = multipart_boundary(&content_type)
+            .ok_or_else(|| {
+                ApiError::Sync("response has no multipart boundary".into())
+            })?;
+        let mut multipart =
+            multer::Multipart::new(response.bytes_stream(), boundary);
+        let mut items: Vec<SyncItem> = Vec::new();
+        let mut positions: HashMap<String, usize> = HashMap::new();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|err| ApiError::Sync(err.to_string()))?
+        {
+            let headers = field.headers().clone();
+            let id = header_string(&headers, "Bookmark-Id").unwrap_or_default();
+            let part_type = header_string(&headers, "Type").unwrap_or_default();
+            let path = header_string(&headers, "Path").unwrap_or_default();
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|err| ApiError::Sync(err.to_string()))?;
+            if id.is_empty() {
+                continue;
+            }
+            let index = match positions.get(&id) {
+                Some(index) => *index,
+                None => {
+                    let index = items.len();
+                    items.push(SyncItem {
+                        id: id.clone(),
+                        ..Default::default()
+                    });
+                    positions.insert(id.clone(), index);
+                    index
+                }
+            };
+            match part_type.as_str() {
+                "json" => {
+                    let bookmark =
+                        serde_json::from_slice::<Bookmark>(&bytes)?;
+                    items[index].bookmark = Some(bookmark);
+                }
+                "html" => {
+                    items[index].html = Some(text_part(&bytes)?);
+                }
+                "markdown" => {
+                    items[index].markdown = Some(text_part(&bytes)?);
+                }
+                "resource" => {
+                    if bytes.len() > 25 * 1024 * 1024 {
+                        return Err(ApiError::Sync(format!(
+                            "resource {path} is larger than 25 MB"
+                        )));
+                    }
+                    items[index].resources.push(SyncResource {
+                        path,
+                        bytes: bytes.to_vec(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(items)
     }
 
     /// Highlights on a bookmark's article.
@@ -424,22 +550,6 @@ impl ReadeckClient {
         )
         .await?;
         Ok(())
-    }
-
-    /// The article body is an HTML fragment rather than a complete document.
-    pub async fn article(&self, id: &str) -> Result<String, ApiError> {
-        let response = self
-            .http
-            .get(self.endpoint(&format!("/bookmarks/{id}/article")))
-            .bearer_auth(self.token.as_ref())
-            .send()
-            .await?;
-
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(ApiError::NoArticle);
-        }
-        let response = ensure_ok(response).await?;
-        Ok(response.text().await?)
     }
 
     pub async fn create_bookmark(
@@ -628,6 +738,32 @@ fn header_usize(response: &reqwest::Response, name: &str) -> Option<usize> {
         .get(name)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
+}
+
+fn header_string(
+    headers: &reqwest::header::HeaderMap,
+    name: &'static str,
+) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+fn text_part(bytes: &[u8]) -> Result<String, ApiError> {
+    String::from_utf8(bytes.to_vec())
+        .map_err(|err| ApiError::Sync(format!("invalid UTF-8 part: {err}")))
+}
+
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    for part in content_type.split(';').skip(1) {
+        let part = part.trim();
+        let Some(value) = part.strip_prefix("boundary=") else {
+            continue;
+        };
+        return Some(value.trim_matches('"').to_string());
+    }
+    None
 }
 
 async fn oauth_json(
@@ -861,6 +997,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn syncs_bookmarks_from_multipart() {
+        let boundary = "eckly-boundary";
+        let body = concat!(
+            "--eckly-boundary\r\n",
+            "Bookmark-Id: bm-1\r\n",
+            "Type: json\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            "{\"id\":\"bm-1\",\"title\":\"Title\"}\r\n",
+            "--eckly-boundary\r\n",
+            "Bookmark-Id: bm-1\r\n",
+            "Type: markdown\r\n",
+            "Content-Type: text/markdown\r\n",
+            "\r\n",
+            "# Hello\r\n",
+            "--eckly-boundary\r\n",
+            "Bookmark-Id: bm-1\r\n",
+            "Type: resource\r\n",
+            "Path: pic.png\r\n",
+            "Group: embedded\r\n",
+            "Content-Type: image/png\r\n",
+            "\r\n",
+            "PNG\r\n",
+            "--eckly-boundary--\r\n",
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: multipart/mixed; boundary=\"{boundary}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (base, server) = serve_once(response, true).await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        let options = SyncOptions {
+            with_json: true,
+            with_html: false,
+            with_markdown: true,
+            with_resources: true,
+            resource_prefix: ".".into(),
+        };
+        let items = client
+            .sync_bookmarks(&["bm-1".into()], &options)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "bm-1");
+        assert_eq!(
+            items[0].bookmark.as_ref().unwrap().display_title(),
+            "Title"
+        );
+        assert_eq!(items[0].markdown.as_deref(), Some("# Hello"));
+        assert_eq!(items[0].resources[0].path, "pic.png");
+        assert_eq!(items[0].resources[0].bytes, b"PNG");
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /api/bookmarks/sync "));
+        assert!(request.contains("\"with_json\":true"));
+        assert!(request.contains("\"with_markdown\":true"));
+        assert!(request.contains("\"with_resources\":true"));
+    }
+
+    #[tokio::test]
     async fn creates_bookmarks_with_an_optional_title() {
         let (base, server) = serve_once(
             response("201 Created", "Bookmark-Id: bm-1\r\n", ""),
@@ -981,21 +1177,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maps_missing_article() {
-        let (base, server) = serve_once(
-            response("404 Not Found", "", r#"{"message":"not found"}"#),
-            false,
-        )
-        .await;
-
-        let client = ReadeckClient::new(&base, "secret-token").unwrap();
-        let error = client.article("missing").await.unwrap_err();
-        assert!(error.is_no_article());
-        assert_eq!(error.status(), Some(404));
-        let _ = server.await;
-    }
-
-    #[tokio::test]
     async fn reads_the_change_log_and_server_time() {
         let body = r#"[
             {"id":"one","time":"2026-11-14T21:18:09.039Z","type":"delete"},
@@ -1109,23 +1290,6 @@ mod tests {
         assert!(request.starts_with("PATCH /api/bookmarks/labels?name=read"));
         assert!(request.contains("later "));
         assert!(request.contains("\"name\":\"reading\""));
-    }
-
-    #[tokio::test]
-    async fn accepts_article_responses_with_many_link_headers() {
-        let links: String = (0..150)
-            .map(|index| {
-                format!(
-                    "Link: <https://example.com/{index}.jpg>; rel=\"media\"\r\n"
-                )
-            })
-            .collect();
-        let (base, server) =
-            serve_once(response("200 OK", &links, "<p>body</p>"), false).await;
-
-        let client = ReadeckClient::new(&base, "secret-token").unwrap();
-        assert_eq!(client.article("one").await.unwrap(), "<p>body</p>");
-        let _ = server.await;
     }
 
     async fn serve_once(

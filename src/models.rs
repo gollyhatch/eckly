@@ -55,6 +55,8 @@ pub struct Bookmark {
     pub id: String,
     #[serde(default, deserialize_with = "deserialize_opt_datetime")]
     pub created: Option<DateTime<Utc>>,
+    #[serde(default, deserialize_with = "deserialize_opt_datetime")]
+    pub updated: Option<DateTime<Utc>>,
     #[serde(default)]
     pub url: String,
     #[serde(default, deserialize_with = "deserialize_opt_entity_string")]

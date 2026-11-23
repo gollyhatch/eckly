@@ -27,7 +27,14 @@ impl Event {
     }
 }
 
-/// Results of background requests.
+/// Result of loading a reader article.
+#[derive(Debug)]
+pub struct LoadedArticle {
+    pub article: Article,
+    pub html: Option<Article>,
+    pub markdown: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum ApiEvent {
     Bookmarks {
@@ -38,9 +45,15 @@ pub enum ApiEvent {
     Labels(Result<Vec<Label>, ApiError>),
     Collections(Result<Vec<Collection>, ApiError>),
     Profile(Result<Profile, ApiError>),
+    Synced {
+        seq: u64,
+        preserve_selection: bool,
+        result: Result<crate::sync::MetadataBatch, ApiError>,
+    },
     Article {
         id: String,
-        result: Result<Article, ApiError>,
+        result: Result<LoadedArticle, ApiError>,
+        signature: Option<String>,
     },
     Annotations {
         bookmark_id: String,

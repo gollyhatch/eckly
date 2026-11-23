@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use ego_tree::NodeRef;
 use image::DynamicImage;
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::layout::Size;
 use scraper::{Html, Node};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -51,6 +52,17 @@ pub struct Article {
     pub images: HashMap<usize, String>,
     /// Annotation source for each block, when it can be computed.
     pub sources: Vec<Option<Source>>,
+    /// Markdown source offsets for each block when parsed from Markdown.
+    pub markdown_sources: Vec<Option<MarkdownSource>>,
+}
+
+/// Maps a rendered block's characters back to the Markdown source.
+#[derive(Debug, Clone, Default)]
+pub struct MarkdownSource {
+    /// Byte offset where the block starts in the Markdown source.
+    pub start: usize,
+    /// Byte offset in the Markdown source for each character of the block text.
+    pub offsets: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +251,7 @@ impl Article {
             blocks,
             images: HashMap::new(),
             sources,
+            markdown_sources: Vec::new(),
         }
     }
 }
@@ -406,6 +419,7 @@ pub fn parse_article(html: &str) -> Article {
         blocks: collector.blocks,
         images: collector.images,
         sources,
+        markdown_sources: Vec::new(),
     }
 }
 
@@ -746,6 +760,338 @@ impl<'a> Collector<'a> {
     }
 }
 
+/// Remove the YAML frontmatter Readeck puts at the top of Markdown exports.
+pub fn strip_markdown_frontmatter(markdown: &str) -> &str {
+    let Some(first_end) = markdown.find('\n') else {
+        return markdown;
+    };
+    if markdown[..first_end].trim_end() != "---" {
+        return markdown;
+    }
+    let body_start = first_end + 1;
+    let mut consumed = body_start;
+    for line in markdown[body_start..].split_inclusive('\n') {
+        consumed += line.len();
+        if line.trim_end() == "---" {
+            return &markdown[consumed..];
+        }
+    }
+    markdown
+}
+
+/// Parse Readeck's Markdown export into article blocks.
+pub fn parse_markdown(markdown: &str) -> Article {
+    let markdown = strip_markdown_frontmatter(markdown);
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    let parser = Parser::new_ext(markdown, options).into_offset_iter();
+    let mut builder = MarkdownBuilder::default();
+    for (event, range) in parser {
+        builder.handle(event, range);
+    }
+    builder.flush();
+    builder.flush_code();
+    builder.article
+}
+
+#[derive(Default)]
+struct MarkdownBuilder {
+    article: Article,
+    text: String,
+    offsets: Vec<usize>,
+    kind: Option<BlockKind>,
+    start: usize,
+    item_prefix: &'static str,
+    in_item: bool,
+    quote_depth: usize,
+    list_depth: usize,
+    code: Option<(String, Vec<usize>, usize)>,
+    image: Option<(String, String, usize)>,
+    table: bool,
+    table_row: Vec<String>,
+    table_cell: Option<String>,
+}
+
+impl MarkdownBuilder {
+    fn begin(&mut self, kind: BlockKind, start: usize) {
+        if self.kind.is_none() {
+            self.kind = Some(kind);
+            self.start = start;
+        }
+    }
+
+    fn push_char(&mut self, ch: char, offset: usize) {
+        self.text.push(ch);
+        self.offsets.push(offset);
+    }
+
+    fn append(&mut self, text: &str, start: usize) {
+        for (index, ch) in text.char_indices() {
+            self.push_char(ch, start + index);
+        }
+    }
+
+    fn on_text(&mut self, text: &str, start: usize) {
+        if let Some((code, offsets, _)) = &mut self.code {
+            for (index, ch) in text.char_indices() {
+                code.push(ch);
+                offsets.push(start + index);
+            }
+        } else if let Some((_, alt, _)) = &mut self.image {
+            alt.push_str(text);
+        } else if let Some(cell) = &mut self.table_cell {
+            cell.push_str(text);
+        } else if !self.table {
+            self.append(text, start);
+        }
+    }
+
+    fn flush(&mut self) {
+        let Some(kind) = self.kind.take() else {
+            return;
+        };
+        let (mut text, mut offsets) =
+            normalize_with_offsets(&self.text, &self.offsets);
+        self.text.clear();
+        self.offsets.clear();
+        if kind == BlockKind::ListItem {
+            let prefix = self.item_prefix;
+            let mut prefixed_offsets = Vec::with_capacity(
+                prefix.chars().count() + offsets.len(),
+            );
+            prefixed_offsets
+                .extend(std::iter::repeat_n(self.start, prefix.chars().count()));
+            prefixed_offsets.append(&mut offsets);
+            text = format!("{prefix}{text}");
+            offsets = prefixed_offsets;
+        } else if matches!(
+            kind,
+            BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3
+        ) && !offsets.is_empty()
+        {
+            // Include the leading `#` characters when copying from here.
+            offsets[0] = self.start;
+        }
+        if text.trim().is_empty() {
+            return;
+        }
+        self.article.blocks.push(Block { kind, text });
+        self.article
+            .markdown_sources
+            .push(Some(MarkdownSource {
+                start: self.start,
+                offsets,
+            }));
+    }
+
+    fn flush_code(&mut self) {
+        let Some((text, offsets, start)) = self.code.take() else {
+            return;
+        };
+        let chars: Vec<char> = text.chars().collect();
+        let mut line = String::new();
+        let mut line_offsets = Vec::new();
+        let mut first_line = true;
+        let push_line = |line: &mut String,
+                             line_offsets: &mut Vec<usize>,
+                             first_line: &mut bool,
+                             article: &mut Article| {
+            while line.ends_with(' ') || line.ends_with('\t') {
+                line.pop();
+                line_offsets.pop();
+            }
+            if line.is_empty() && line_offsets.is_empty() {
+                return;
+            }
+            let block_start = if *first_line {
+                start
+            } else {
+                line_offsets.first().copied().unwrap_or(start)
+            };
+            *first_line = false;
+            article.blocks.push(Block {
+                kind: BlockKind::Code,
+                text: std::mem::take(line),
+            });
+            article.markdown_sources.push(Some(MarkdownSource {
+                start: block_start,
+                offsets: std::mem::take(line_offsets),
+            }));
+        };
+        for (index, ch) in chars.into_iter().enumerate() {
+            if ch == '\n' {
+                push_line(
+                    &mut line,
+                    &mut line_offsets,
+                    &mut first_line,
+                    &mut self.article,
+                );
+            } else {
+                line.push(ch);
+                line_offsets.push(offsets.get(index).copied().unwrap_or(start));
+            }
+        }
+        push_line(
+            &mut line,
+            &mut line_offsets,
+            &mut first_line,
+            &mut self.article,
+        );
+    }
+
+    fn flush_image(&mut self) {
+        let Some((dest, alt, start)) = self.image.take() else {
+            return;
+        };
+        let text = normalize(&alt);
+        let index = self.article.blocks.len();
+        self.article.images.insert(index, dest);
+        self.article.markdown_sources.push(Some(MarkdownSource {
+            start,
+            offsets: vec![start; text.chars().count()],
+        }));
+        self.article
+            .blocks
+            .push(Block { kind: BlockKind::Image, text });
+    }
+
+    fn flush_table_row(&mut self) {
+        if self.table_row.is_empty() {
+            return;
+        }
+        let text = self.table_row.join("  ·  ");
+        self.table_row.clear();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.article.blocks.push(Block {
+            kind: BlockKind::Paragraph,
+            text,
+        });
+        self.article.markdown_sources.push(None);
+    }
+
+    fn handle(&mut self, event: Event<'_>, range: std::ops::Range<usize>) {
+        match event {
+            Event::Start(Tag::Paragraph) => {
+                if !self.in_item {
+                    let kind = if self.quote_depth > 0 {
+                        BlockKind::Quote
+                    } else {
+                        BlockKind::Paragraph
+                    };
+                    self.begin(kind, range.start);
+                }
+            }
+            Event::End(TagEnd::Paragraph) => {
+                if !self.in_item {
+                    self.flush();
+                }
+            }
+            Event::Start(Tag::Heading { level, .. }) => {
+                self.begin(markdown_heading_kind(level), range.start);
+            }
+            Event::End(TagEnd::Heading(_)) => self.flush(),
+            Event::Start(Tag::BlockQuote(_)) => self.quote_depth += 1,
+            Event::End(TagEnd::BlockQuote(_)) => {
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+            }
+            Event::Start(Tag::CodeBlock(_)) => {
+                self.code = Some((String::new(), Vec::new(), range.start));
+            }
+            Event::End(TagEnd::CodeBlock) => self.flush_code(),
+            Event::Start(Tag::List(_)) => {
+                if self.in_item {
+                    self.flush();
+                }
+                self.list_depth += 1;
+            }
+            Event::End(TagEnd::List(_)) => {
+                self.list_depth = self.list_depth.saturating_sub(1);
+            }
+            Event::Start(Tag::Item) => {
+                self.in_item = true;
+                self.item_prefix = markdown_list_bullet(self.list_depth);
+                self.begin(BlockKind::ListItem, range.start);
+            }
+            Event::End(TagEnd::Item) => {
+                self.flush();
+                self.in_item = false;
+            }
+            Event::Rule => {
+                self.article.blocks.push(Block {
+                    kind: BlockKind::Rule,
+                    text: String::new(),
+                });
+                self.article.markdown_sources.push(None);
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                self.image = Some((
+                    dest_url.to_string(),
+                    String::new(),
+                    range.start,
+                ));
+            }
+            Event::End(TagEnd::Image) => self.flush_image(),
+            Event::Start(Tag::Table(_)) => self.table = true,
+            Event::End(TagEnd::Table) => self.table = false,
+            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
+                self.table_row.clear();
+            }
+            Event::End(TagEnd::TableHead) | Event::End(TagEnd::TableRow) => {
+                self.flush_table_row();
+            }
+            Event::Start(Tag::TableCell) => {
+                self.table_cell = Some(String::new());
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(cell) = self.table_cell.take() {
+                    let cell = cell.trim();
+                    if !cell.is_empty() {
+                        self.table_row.push(cell.to_string());
+                    }
+                }
+            }
+            Event::Text(text) => self.on_text(&text, range.start),
+            Event::Code(text) => self.on_text(&text, range.start),
+            Event::SoftBreak | Event::HardBreak => {
+                if self.code.is_some() {
+                    self.push_char('\n', range.start);
+                } else {
+                    self.on_text(" ", range.start);
+                }
+            }
+            Event::TaskListMarker(done) => {
+                self.on_text(if done { "[x] " } else { "[ ] " }, range.start);
+            }
+            Event::FootnoteReference(name) => {
+                self.on_text(&format!("[^{name}]"), range.start);
+            }
+            Event::Html(_) | Event::InlineHtml(_) => {}
+            _ => {}
+        }
+    }
+}
+
+fn markdown_heading_kind(level: HeadingLevel) -> BlockKind {
+    match level {
+        HeadingLevel::H1 => BlockKind::Heading1,
+        HeadingLevel::H2 => BlockKind::Heading2,
+        _ => BlockKind::Heading3,
+    }
+}
+
+fn markdown_list_bullet(depth: usize) -> &'static str {
+    match depth {
+        1 => "• ",
+        2 => "◦ ",
+        _ => "▪ ",
+    }
+}
+
 fn selector_for(
     root: NodeRef<'_, Node>,
     node: NodeRef<'_, Node>,
@@ -853,6 +1199,98 @@ fn is_block(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_markdown_articles() {
+        let markdown = r#"---
+title: Test
+description: Frontmatter
+---
+
+# Heading
+
+A paragraph with **bold** text.
+
+- First item
+- Second item
+
+> Quoted text
+
+```rust
+let x = 1;
+```
+
+| a | b |
+|---|---|
+| c | d |
+
+![A picture](picture.jpg)
+"#;
+        let article = parse_markdown(markdown);
+        let kinds: Vec<BlockKind> =
+            article.blocks.iter().map(|block| block.kind).collect();
+        assert!(kinds.contains(&BlockKind::Heading1));
+        assert!(kinds.contains(&BlockKind::Paragraph));
+        assert!(kinds.contains(&BlockKind::ListItem));
+        assert!(kinds.contains(&BlockKind::Quote));
+        assert!(kinds.contains(&BlockKind::Code));
+        assert!(kinds.contains(&BlockKind::Image));
+        assert!(!article
+            .blocks
+            .iter()
+            .any(|block| block.text.contains("Frontmatter")));
+        assert!(article
+            .blocks
+            .iter()
+            .any(|block| block.text == "A paragraph with bold text."));
+        assert!(article
+            .blocks
+            .iter()
+            .any(|block| block.kind == BlockKind::ListItem
+                && block.text == "• First item"));
+        let image = article
+            .blocks
+            .iter()
+            .position(|block| block.kind == BlockKind::Image)
+            .unwrap();
+        assert_eq!(article.images[&image], "picture.jpg");
+        assert!(article
+            .blocks
+            .iter()
+            .any(|block| block.text.contains("a  ·  b")));
+        assert_eq!(
+            article.markdown_sources.len(),
+            article.blocks.len()
+        );
+    }
+
+    #[test]
+    fn parses_nested_markdown_lists() {
+        let article = parse_markdown("- First\n  - Nested\n- Second\n");
+        let texts: Vec<&str> = article
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["• First", "◦ Nested", "• Second"]);
+    }
+
+    #[test]
+    fn markdown_sources_include_block_syntax() {
+        let markdown = "## Heading\n\n- item\n";
+        let article = parse_markdown(markdown);
+        let heading = &article.blocks[0];
+        assert_eq!(heading.text, "Heading");
+        let source = article.markdown_sources[0].as_ref().unwrap();
+        assert_eq!(&markdown[source.start..source.start + 2], "##");
+        let item = article
+            .blocks
+            .iter()
+            .position(|block| block.kind == BlockKind::ListItem)
+            .unwrap();
+        let source = article.markdown_sources[item].as_ref().unwrap();
+        assert_eq!(&markdown[source.start..source.start + 1], "-");
+    }
 
     #[test]
     fn wraps_with_character_ranges() {

@@ -8,7 +8,7 @@ leaving the terminal.
 
 ![eckly bookmark list using the Ayu Dark theme](screenshots/list.png)
 
-The reader turns Readeck's article HTML into readable, wrapped text with
+The reader turns Readeck's article Markdown into readable, wrapped text with
 headings, lists, quotes, code blocks and inline images:
 
 ![eckly reading view using the Ayu Dark theme](screenshots/reader.png)
@@ -27,20 +27,21 @@ order; press `Enter` to jump to one:
   current article with highlighted matches.
 - **Annotate** paragraphs with colored highlights and notes. The Library pane
   lists every highlight by bookmark, and the reader browses or edits them.
-- **Read** extracted articles in a comfortable, scrollable reader. Plain text is
-  reflowed to the terminal width; headings, lists, quotes, code and images are
-  rendered inline. Images use truecolor half blocks and are fetched from
-  Readeck's media route.
+- **Read** extracted articles in a comfortable, scrollable reader. Readeck's
+  Markdown export is reflowed to the terminal width; headings, lists, quotes,
+  code and images are rendered inline. Images use truecolor half blocks and
+  cached resources when available.
 - **Manage** bookmarks: mark read/unread, favorite, archive, edit labels,
   title, and short notes, or delete with a confirmation.
 - **Bulk edit** a selection: press `Space` to select bookmarks, then apply
   `m`, `f`, `a`, `t` or `D` to the whole selection.
 - **Save links** directly from the TUI.
-- **Offline cache**: bookmark metadata and article text are cached locally, so
-  cached bookmarks remain browsable and readable when Readeck is unreachable.
+- **Offline cache**: bookmark metadata, Markdown and article resources are
+  cached locally, so synced bookmarks remain browsable and readable when
+  Readeck is unreachable.
 - **Progress tracking**: the reader resumes at the bookmark’s saved percentage
   and sends the updated position to Readeck when you leave.
-- **Lazy pagination** and live sorting, without blocking the UI.
+- **Incremental sync** through Readeck's change log, without blocking the UI.
 - **Interactive setup** on first launch; credentials are stored with `0600`
   permissions.
 - **Themes** — all 39 built-in [opaline](https://crates.io/crates/opaline)
@@ -178,15 +179,16 @@ environment-based configuration.
 ### Offline cache
 
 eckly caches bookmark metadata, labels, collections, annotations, the user
-profile and article HTML under:
+profile, Markdown and article resources under:
 
 - `$XDG_CACHE_HOME/eckly`, or
 - `~/.cache/eckly` when `XDG_CACHE_HOME` is not set.
 
-When Readeck cannot be reached, the help line shows **OFFLINE** and eckly falls
-back to the cached bookmark list. Filters, metadata search and sorting work
-locally; collection views require a connection. Opening a cached bookmark loads
-its saved article text.
+The bookmark list is rendered from this cache. When Readeck cannot be reached,
+the help line shows **OFFLINE** and the cached list remains available. Filters,
+metadata search and sorting work locally; full-text search and collection views
+require a connection. Opening a bookmark uses cached Markdown and resources when
+they are fresh, and downloads them on demand otherwise.
 
 Changes made offline — read state, favorites, archive state, labels, title, note
 and deletion — are applied locally and stored in a pending queue. The status
@@ -194,9 +196,9 @@ line shows the number of pending changes. The queue is sent automatically when
 Readeck becomes reachable again, including on the next online launch. Creating
 new bookmarks still requires a connection.
 
-Article images and full-text search are not cached; offline search matches
-titles, descriptions, notes, URLs and labels. The cache is not automatically
-evicted.
+Markdown and resources are cached only after a content sync or the first time a
+bookmark is opened. Offline search matches titles, descriptions, notes, URLs and
+labels. The cache is not automatically evicted.
 
 Start the TUI in forced offline mode with:
 
@@ -224,31 +226,30 @@ variables as the TUI, and prints the new bookmark ID.
 
 ### Sync for offline reading
 
-The `sync` subcommand downloads bookmark metadata, article HTML and
-annotations without starting the TUI. Run without flags to sync incrementally:
-it replays Readeck's change log since the previous sync, applies updates, drops
-bookmarks deleted on the server, and downloads the article of every new or
-changed bookmark.
-Articles already cached for unchanged bookmarks are left alone. The first run
-has no watermark, so it snapshots the whole library and downloads every article
-that is not cached yet.
+The `sync` subcommand uses Readeck's `/bookmarks/sync` endpoint without starting
+the TUI. Every run asks for bookmark IDs changed or deleted since the stored
+watermark and refreshes their metadata. The first run has no watermark, so it
+takes a complete metadata snapshot.
 
 ```sh
-eckly sync                # everything that changed since the last sync
-eckly sync --unread       # the Unread list (all non-archived bookmarks)
-eckly sync --favorites    # favorite bookmarks
-eckly sync --archived     # archived bookmarks
-eckly sync --all          # everything
+eckly sync                # metadata and annotations only
+eckly sync --unread       # also cache Markdown/resources for unread bookmarks
+eckly sync --favorites    # also cache favorite bookmarks
+eckly sync --archived     # also cache archived bookmarks
+eckly sync --all          # also cache every bookmark
 ```
 
-The watermark is stored in the cache and advanced only after every change is
-applied, so a failed run is retried by the next one.
-
-Flags can be combined to sync the union of several lists:
+Flags only select which bookmarks get Markdown and resources in addition to
+metadata. Bookmarks whose content is already cached are skipped. The flags can
+be combined:
 
 ```sh
 eckly sync --unread --favorites
 ```
+
+The watermark is stored in the cache and advanced only after metadata is
+applied, so a failed metadata run is retried by the next one. Content download
+failures are reported separately and retried by a later content sync.
 
 Pending offline changes are uploaded first. The command uses the same config
 file, `--server`/`--token`, or environment variables as the TUI. In an

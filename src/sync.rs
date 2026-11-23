@@ -7,16 +7,16 @@ use chrono::{DateTime, Utc};
 use clap::{ArgGroup, Args};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::api::ReadeckClient;
-use crate::cache::Cache;
+use crate::api::{ApiError, ReadeckClient, SyncOptions};
+use crate::cache::{Cache, content_signature};
 use crate::config::Config;
 use crate::models::{
-    Bookmark, BookmarkQuery, Filter, SearchQuery, Sort, SyncChange,
-    SyncChangeKind,
+    Bookmark, Filter, SyncChange, SyncChangeKind,
 };
 
-const PAGE_SIZE: usize = 100;
 const ANNOTATION_PAGE_SIZE: usize = 100;
+const METADATA_BATCH_SIZE: usize = 500;
+const CONTENT_BATCH_SIZE: usize = 20;
 
 const PROGRESS_TEMPLATE: &str = "{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}";
 
@@ -27,28 +27,64 @@ const PROGRESS_TEMPLATE: &str = "{msg}\n{spinner:.green} [{elapsed_precise}] [{w
         .args(["unread", "favorites", "archived", "all"])
 ))]
 pub struct SyncArgs {
-    /// Download articles from the Unread list
+    /// Download Markdown and resources from the Unread list
     #[arg(long)]
     pub unread: bool,
 
-    /// Download favorite bookmarks
-    #[arg(long)]
+    /// Download Markdown and resources for favorite bookmarks
+    #[arg(long, alias = "favorite")]
     pub favorites: bool,
 
-    /// Download archived bookmarks
+    /// Download Markdown and resources for archived bookmarks
     #[arg(long)]
     pub archived: bool,
 
-    /// Download every bookmark
+    /// Download Markdown and resources for every bookmark
     #[arg(long)]
     pub all: bool,
 }
 
 impl SyncArgs {
-    /// Without a list flag, sync only what changed since the last sync.
-    fn incremental(&self) -> bool {
-        !self.unread && !self.favorites && !self.archived && !self.all
+    /// Lists whose bookmarks should have Markdown and resources downloaded.
+    /// Metadata is always synced for every changed bookmark.
+    fn content_filters(&self) -> Vec<Filter> {
+        if self.all {
+            return vec![Filter::All];
+        }
+        let mut filters = Vec::new();
+        if self.unread {
+            filters.push(Filter::Unread);
+        }
+        if self.favorites {
+            filters.push(Filter::Marked);
+        }
+        if self.archived {
+            filters.push(Filter::Archived);
+        }
+        filters
     }
+}
+
+/// Bookmarks changed since the last sync, plus deletions and the new
+/// watermark.
+#[derive(Debug, Default)]
+pub struct MetadataBatch {
+    pub updates: Vec<Bookmark>,
+    pub removed: Vec<String>,
+    pub watermark: Option<DateTime<Utc>>,
+    pub snapshot: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContentUpdate {
+    pub id: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ContentBatch {
+    pub synced: Vec<ContentUpdate>,
+    pub errors: Vec<String>,
 }
 
 pub async fn run(
@@ -74,36 +110,50 @@ pub async fn run(
     let interactive = std::io::stderr().is_terminal();
     upload_pending_changes(&client, &mut cache, interactive).await?;
 
-    if !args.incremental() {
-        let filters = filters_for(args);
-        return sync_lists(
-            &client,
-            &mut cache,
-            &cache_dir,
-            filters,
-            interactive,
-        )
-        .await;
+    let progress = make_progress(0, interactive);
+    progress.set_message("Fetching bookmark changes...");
+    let batch = match fetch_metadata(&client, cache.last_sync()).await {
+        Ok(batch) => batch,
+        Err(err) => {
+            progress.abandon_with_message("Failed to fetch changes");
+            return Err(err).context("could not fetch changes from Readeck");
+        }
+    };
+    progress.finish_and_clear();
+    apply_metadata(&mut cache, batch)?;
+
+    refresh_metadata(&client, &mut cache).await;
+    cache.save().context("could not save bookmark cache")?;
+
+    let filters = args.content_filters();
+    if !filters.is_empty() {
+        let targets: Vec<Bookmark> = cache
+            .bookmarks()
+            .into_iter()
+            .filter(|bookmark| bookmark.has_article)
+            .filter(|bookmark| {
+                filters.iter().any(|filter| filter.matches(bookmark))
+            })
+            .filter(|bookmark| !cache.has_fresh_content(bookmark))
+            .collect();
+        let content =
+            fetch_content(&client, cache.dir(), &targets, true, interactive)
+                .await;
+        for item in content.synced {
+            cache.set_content(&item.id, item.signature);
+        }
+        cache.save().context("could not save bookmark cache")?;
+        if !content.errors.is_empty() {
+            for error in &content.errors {
+                eprintln!("{error}");
+            }
+            bail!("{} content download(s) failed", content.errors.len());
+        }
     }
 
-    match cache.last_sync() {
-        Some(since) => {
-            sync_changes(&client, &mut cache, &cache_dir, since, interactive)
-                .await
-        }
-        // Without a watermark there is nothing to diff against, so take a
-        // complete snapshot instead.
-        None => {
-            sync_lists(
-                &client,
-                &mut cache,
-                &cache_dir,
-                vec![Filter::All],
-                interactive,
-            )
-            .await
-        }
-    }
+    download_annotations(&client, &mut cache, interactive).await?;
+    cache.save().context("could not save bookmark cache")?;
+    Ok(())
 }
 
 fn make_progress(len: u64, interactive: bool) -> ProgressBar {
@@ -119,229 +169,180 @@ fn make_progress(len: u64, interactive: bool) -> ProgressBar {
     progress
 }
 
-fn filters_for(args: &SyncArgs) -> Vec<Filter> {
-    if args.all || args.incremental() {
-        return vec![Filter::All];
-    }
-    let mut filters = Vec::new();
-    if args.unread {
-        filters.push(Filter::Unread);
-    }
-    if args.favorites {
-        filters.push(Filter::Marked);
-    }
-    if args.archived {
-        filters.push(Filter::Archived);
-    }
-    filters
-}
-
-/// Only a sync of every list yields a cache complete enough to advance the
-/// incremental watermark.
-fn is_complete_snapshot(filters: &[Filter]) -> bool {
-    filters.len() == 1 && filters[0] == Filter::All
-}
-
-/// Download the requested lists, cache their metadata and fetch new or
-/// changed article bodies.
-async fn sync_lists(
-    client: &ReadeckClient,
-    cache: &mut Cache,
-    cache_dir: &Path,
-    filters: Vec<Filter>,
-    interactive: bool,
-) -> Result<()> {
-    let complete = is_complete_snapshot(&filters);
-    // Queried before the snapshot so the next incremental run cannot miss a
-    // change that lands while the list is being paginated.
-    let (changed, watermark) = match cache.last_sync() {
-        Some(since) => {
-            let (changed, newest) = changes_since(client, since).await;
-            (changed, complete.then(|| newest.unwrap_or(since)))
-        }
-        None => {
-            let newest = if complete {
-                snapshot_watermark(client).await
-            } else {
-                None
-            };
-            (HashSet::new(), newest)
-        }
-    };
-    let list_progress = make_progress(0, interactive);
-    let bookmarks =
-        match download_bookmark_lists(client, &filters, &list_progress).await {
-            Ok(bookmarks) => {
-                list_progress.finish_with_message(format!(
-                    "Fetched {} bookmark(s)",
-                    bookmarks.len()
-                ));
-                bookmarks
-            }
-            Err(err) => {
-                list_progress.abandon_with_message("Failed to fetch bookmarks");
-                return Err(err);
-            }
-        };
-    if complete {
-        let present: HashSet<&str> =
-            bookmarks.iter().map(|b| b.id.as_str()).collect();
-        cache.retain_bookmarks(|id| present.contains(id));
-    }
-    let bookmarks = merge_pending(cache, bookmarks);
-    cache.upsert_bookmarks(&bookmarks);
-    refresh_metadata(client, cache).await;
-    cache.save().context("could not save bookmark cache")?;
-
-    let articles: Vec<Bookmark> = bookmarks
-        .into_iter()
-        .filter(|bookmark| needs_article(bookmark, &changed, cache))
-        .collect();
-    download_articles(client, cache_dir, articles, interactive).await?;
-    download_annotations(client, cache, interactive).await?;
-
-    if let Some(watermark) = watermark {
-        cache.set_last_sync(watermark);
-    }
-    cache.save().context("could not save bookmark cache")?;
-    Ok(())
-}
-
-/// An article is fetched when it is missing locally, or when its bookmark
-/// changed on the server since the last sync.
-fn needs_article(
-    bookmark: &Bookmark,
-    changed: &HashSet<String>,
-    cache: &Cache,
-) -> bool {
-    bookmark.has_article
-        && (changed.contains(&bookmark.id) || !cache.has_article(&bookmark.id))
-}
-
-/// Bookmark IDs updated since `since`, plus the server's time at response.
+/// Fetch metadata for every bookmark that changed since the watermark.
 ///
-/// Best effort: on failure the caller keeps its existing watermark and
-/// re-fetches only missing articles.
-async fn changes_since(
+/// With no watermark the change log is a complete snapshot of updated
+/// bookmarks. Deletions are only available for incremental queries.
+pub async fn fetch_metadata(
     client: &ReadeckClient,
-    since: DateTime<Utc>,
-) -> (HashSet<String>, Option<DateTime<Utc>>) {
-    match client.sync_changes(Some(since)).await {
-        Ok((changes, time)) => {
-            let changed = changes
-                .iter()
-                .filter(|change| change.kind == SyncChangeKind::Update)
-                .map(|change| change.id.clone())
-                .collect();
-            let time =
-                time.or_else(|| changes.iter().map(|change| change.time).max());
-            (changed, time)
-        }
-        Err(_) => (HashSet::new(), None),
-    }
-}
-
-/// The server's newest change time, used as the starting watermark for an
-/// incremental sync after a complete snapshot.
-///
-/// Best effort: servers without the change log simply never sync
-/// incrementally.
-async fn snapshot_watermark(client: &ReadeckClient) -> Option<DateTime<Utc>> {
-    let (changes, time) = client.sync_changes(None).await.ok()?;
-    time.or_else(|| changes.iter().map(|change| change.time).max())
-}
-
-/// Apply only what the server reports as changed since the last sync.
-async fn sync_changes(
-    client: &ReadeckClient,
-    cache: &mut Cache,
-    cache_dir: &Path,
-    since: DateTime<Utc>,
-    interactive: bool,
-) -> Result<()> {
-    let progress = make_progress(0, interactive);
-    progress.set_message("Fetching changes...");
-    let (changes, server_time) = match client.sync_changes(Some(since)).await {
-        Ok(result) => result,
-        Err(err) => {
-            progress.abandon_with_message("Failed to fetch changes");
-            return Err(err).context("could not fetch changes from Readeck");
-        }
-    };
-    // The server's clock at response time is the natural next `since`: it
-    // covers everything in this response without repeating it forever.
-    let watermark = server_time.unwrap_or_else(|| {
-        changes
-            .iter()
-            .map(|change| change.time)
-            .max()
-            .unwrap_or(since)
-    });
+    since: Option<DateTime<Utc>>,
+) -> Result<MetadataBatch, ApiError> {
+    let (changes, server_time) = client.sync_changes(since).await?;
+    let watermark = server_time.or_else(|| changes.iter().map(|c| c.time).max());
     let changes = latest_changes(changes);
-    progress.set_length(changes.len() as u64);
-    progress.set_message("Fetching changed bookmarks...");
 
-    let pending_updates = cache.pending_updates();
-    let mut fetched = Vec::new();
-    let mut removed = 0;
-    let mut errors = Vec::new();
-
+    let mut removed = Vec::new();
+    let mut ids = Vec::new();
     for change in changes {
         match change.kind {
-            SyncChangeKind::Delete => {
-                cache.remove_bookmark(&change.id);
-                removed += 1;
+            SyncChangeKind::Delete => removed.push(change.id),
+            SyncChangeKind::Update => ids.push(change.id),
+        }
+    }
+
+    let mut updates = Vec::new();
+    for chunk in ids.chunks(METADATA_BATCH_SIZE) {
+        let options = SyncOptions {
+            with_json: true,
+            ..Default::default()
+        };
+        let items = client.sync_bookmarks(chunk, &options).await?;
+        for item in items {
+            if let Some(bookmark) = item.bookmark {
+                updates.push(bookmark);
             }
-            SyncChangeKind::Update => {
-                match client.bookmark(&change.id).await {
-                    Ok(mut bookmark) => {
-                        if let Some(patch) = pending_updates.get(&bookmark.id) {
-                            bookmark.apply_patch(patch);
-                        }
-                        fetched.push(bookmark);
-                    }
-                    // Deleted between the change log and this request.
-                    Err(err) if err.status() == Some(404) => {
-                        cache.remove_bookmark(&change.id);
-                        removed += 1;
-                    }
-                    Err(err) => errors.push(format!("{}: {err}", change.id)),
+        }
+    }
+
+    Ok(MetadataBatch {
+        updates,
+        removed,
+        watermark,
+        snapshot: since.is_none(),
+    })
+}
+
+/// Merge a metadata batch into the cache and advance the sync watermark.
+pub fn apply_metadata(cache: &mut Cache, batch: MetadataBatch) -> Result<()> {
+    let pending_updates = cache.pending_updates();
+    let pending_deletes: HashSet<String> =
+        cache.pending_deletes().into_iter().collect();
+
+    if batch.snapshot {
+        let present: HashSet<&str> =
+            batch.updates.iter().map(|b| b.id.as_str()).collect();
+        let pending: HashSet<&str> =
+            pending_updates.keys().map(String::as_str).collect();
+        cache.retain_bookmarks(|id| present.contains(id) || pending.contains(id));
+    }
+
+    for id in &batch.removed {
+        cache.remove_bookmark(id);
+    }
+
+    let mut updates = batch.updates;
+    updates.retain(|bookmark| !pending_deletes.contains(&bookmark.id));
+    for bookmark in &mut updates {
+        if let Some(patch) = pending_updates.get(&bookmark.id) {
+            bookmark.apply_patch(patch);
+        }
+    }
+    cache.upsert_bookmarks(&updates);
+    if let Some(watermark) = batch.watermark {
+        cache.set_last_sync(watermark);
+    }
+    cache.save().context("could not save bookmark cache")
+}
+
+/// Download Markdown, resources and an optional HTML sidecar for the given
+/// bookmarks. The HTML sidecar is used only for annotation selectors.
+pub async fn fetch_content(
+    client: &ReadeckClient,
+    cache_dir: &Path,
+    bookmarks: &[Bookmark],
+    with_html: bool,
+    interactive: bool,
+) -> ContentBatch {
+    let targets: Vec<&Bookmark> =
+        bookmarks.iter().filter(|bookmark| bookmark.has_article).collect();
+    let progress = make_progress(targets.len() as u64, interactive);
+    progress.set_message("Downloading bookmark content...");
+    let mut batch = ContentBatch::default();
+
+    for chunk in targets.chunks(CONTENT_BATCH_SIZE) {
+        let ids: Vec<String> =
+            chunk.iter().map(|bookmark| bookmark.id.clone()).collect();
+        let options = SyncOptions {
+            with_json: false,
+            with_html,
+            with_markdown: true,
+            with_resources: true,
+            resource_prefix: ".".into(),
+        };
+        let items = match client.sync_bookmarks(&ids, &options).await {
+            Ok(items) => items,
+            Err(err) => {
+                batch
+                    .errors
+                    .push(format!("content sync failed: {err}"));
+                progress.inc(chunk.len() as u64);
+                continue;
+            }
+        };
+        let by_id: HashMap<&str, &Bookmark> =
+            chunk.iter().map(|b| (b.id.as_str(), *b)).collect();
+        for item in items {
+            let Some(bookmark) = by_id.get(item.id.as_str()) else {
+                continue;
+            };
+            let Some(markdown) = item.markdown else {
+                batch
+                    .errors
+                    .push(format!("{}: no markdown returned", item.id));
+                continue;
+            };
+            if let Err(err) = Cache::remove_content_from_dir(cache_dir, &item.id)
+            {
+                batch.errors.push(format!("{}: {err:#}", item.id));
+                continue;
+            }
+            if let Err(err) = Cache::write_markdown_to_dir(
+                cache_dir,
+                &item.id,
+                &markdown,
+            ) {
+                batch.errors.push(format!("{}: {err:#}", item.id));
+                continue;
+            }
+            let mut failed = false;
+            for resource in item.resources {
+                if let Err(err) = Cache::write_resource_to_dir(
+                    cache_dir,
+                    &item.id,
+                    &resource.path,
+                    &resource.bytes,
+                ) {
+                    batch.errors.push(format!(
+                        "{}: resource {}: {err:#}",
+                        item.id, resource.path
+                    ));
+                    failed = true;
                 }
             }
+            if let Some(html) = item.html {
+                if let Err(err) = Cache::write_article_to_dir(
+                    cache_dir,
+                    &item.id,
+                    &html,
+                ) {
+                    batch.errors.push(format!("{}: {err:#}", item.id));
+                    failed = true;
+                }
+            }
+            if !failed {
+                batch.synced.push(ContentUpdate {
+                    id: item.id,
+                    signature: content_signature(bookmark),
+                });
+            }
         }
-        progress.inc(1);
+        progress.inc(chunk.len() as u64);
     }
     progress.finish_with_message(format!(
-        "Fetched {} changed bookmark(s), removed {removed}",
-        fetched.len()
+        "Downloaded content for {} bookmark(s)",
+        batch.synced.len()
     ));
-
-    // Everything here changed on the server since the last sync, so refresh
-    // its article too, even when a copy is already cached.
-    let articles: Vec<Bookmark> = fetched
-        .iter()
-        .filter(|bookmark| bookmark.has_article)
-        .cloned()
-        .collect();
-    cache.upsert_bookmarks(&fetched);
-    refresh_metadata(client, cache).await;
-    cache.save().context("could not save bookmark cache")?;
-
-    if !errors.is_empty() {
-        for error in &errors {
-            eprintln!("{error}");
-        }
-        bail!("{} change(s) failed to sync", errors.len());
-    }
-
-    download_articles(client, cache_dir, articles, interactive).await?;
-    download_annotations(client, cache, interactive).await?;
-
-    // Only advance the watermark once every change was applied; otherwise the
-    // next run would skip whatever failed here.
-    cache.set_last_sync(watermark);
-    cache.save().context("could not save bookmark cache")?;
-    Ok(())
+    batch
 }
 
 /// Keep the newest entry per bookmark, oldest first.
@@ -369,19 +370,68 @@ async fn refresh_metadata(client: &ReadeckClient, cache: &mut Cache) {
     }
 }
 
-/// Keep local edits that have not reached the server yet.
-fn merge_pending(cache: &Cache, bookmarks: Vec<Bookmark>) -> Vec<Bookmark> {
-    let pending_updates = cache.pending_updates();
-    let pending_deletes: HashSet<String> =
-        cache.pending_deletes().into_iter().collect();
-    let mut bookmarks = bookmarks;
-    for bookmark in &mut bookmarks {
-        if let Some(patch) = pending_updates.get(&bookmark.id) {
-            bookmark.apply_patch(patch);
+/// Download annotations for every annotated bookmark and drop stale ones.
+async fn download_annotations(
+    client: &ReadeckClient,
+    cache: &mut Cache,
+    interactive: bool,
+) -> Result<()> {
+    let mut annotated: HashSet<String> = HashSet::new();
+    let mut offset = 0;
+    loop {
+        let page = client
+            .annotations_page(ANNOTATION_PAGE_SIZE, offset)
+            .await
+            .context("could not list annotations")?;
+        if page.items.is_empty() {
+            break;
+        }
+        let count = page.items.len();
+        for annotation in page.items {
+            if !annotation.bookmark_id.is_empty() {
+                annotated.insert(annotation.bookmark_id);
+            }
+        }
+        offset += count;
+        if offset >= page.total {
+            break;
         }
     }
-    bookmarks.retain(|bookmark| !pending_deletes.contains(&bookmark.id));
-    bookmarks
+
+    let known: HashSet<String> = cache.bookmark_ids().into_iter().collect();
+    let annotated: HashSet<String> = annotated
+        .into_iter()
+        .filter(|id| known.contains(id))
+        .collect();
+
+    let progress = make_progress(annotated.len() as u64, interactive);
+    progress.set_message("Downloading annotations...");
+    let mut synced = 0usize;
+    let mut errors = Vec::new();
+    for bookmark_id in &annotated {
+        match client.annotations(bookmark_id).await {
+            Ok(annotations) => {
+                synced += annotations.len();
+                cache.set_annotations(bookmark_id, annotations);
+            }
+            Err(err) => errors.push(format!("{bookmark_id}: {err}")),
+        }
+        progress.inc(1);
+    }
+    for bookmark_id in &known {
+        if !annotated.contains(bookmark_id) {
+            cache.set_annotations(bookmark_id, Vec::new());
+        }
+    }
+    progress.finish_with_message(format!("Synced {synced} annotation(s)"));
+
+    if !errors.is_empty() {
+        for error in &errors {
+            eprintln!("{error}");
+        }
+        bail!("{} annotation list(s) failed to sync", errors.len());
+    }
+    Ok(())
 }
 
 async fn upload_pending_changes(
@@ -454,182 +504,169 @@ async fn upload_pending_changes(
     Ok(())
 }
 
-async fn download_bookmark_lists(
-    client: &ReadeckClient,
-    filters: &[Filter],
-    progress: &ProgressBar,
-) -> Result<Vec<Bookmark>> {
-    let mut seen = HashSet::new();
-    let mut bookmarks = Vec::new();
-    let mut expected_total = 0u64;
-    progress.set_message("Fetching bookmark list...");
-
-    for filter in filters {
-        let mut offset = 0;
-        loop {
-            let query = BookmarkQuery::new(
-                filter,
-                &SearchQuery::default(),
-                Sort::Newest,
-                PAGE_SIZE,
-                offset,
-            );
-            let page =
-                client.list_bookmarks(&query).await.with_context(|| {
-                    format!("could not list bookmarks for {}", filter.title())
-                })?;
-            if page.items.is_empty() {
-                break;
-            }
-            let count = page.items.len();
-            let filter_total = page.total.max(count);
-            if offset == 0 {
-                expected_total += filter_total as u64;
-                progress.set_length(expected_total);
-            }
-            for bookmark in page.items {
-                if seen.insert(bookmark.id.clone()) {
-                    bookmarks.push(bookmark);
-                }
-            }
-            progress.inc(count as u64);
-            offset += count;
-            if offset >= page.total {
-                break;
-            }
-        }
-    }
-
-    Ok(bookmarks)
-}
-
-/// Download annotations for every annotated bookmark and drop stale ones.
-async fn download_annotations(
-    client: &ReadeckClient,
-    cache: &mut Cache,
-    interactive: bool,
-) -> Result<()> {
-    let mut annotated: HashSet<String> = HashSet::new();
-    let mut offset = 0;
-    loop {
-        let page = client
-            .annotations_page(ANNOTATION_PAGE_SIZE, offset)
-            .await
-            .context("could not list annotations")?;
-        if page.items.is_empty() {
-            break;
-        }
-        let count = page.items.len();
-        for annotation in page.items {
-            if !annotation.bookmark_id.is_empty() {
-                annotated.insert(annotation.bookmark_id);
-            }
-        }
-        offset += count;
-        if offset >= page.total {
-            break;
-        }
-    }
-
-    let known: HashSet<String> = cache.bookmark_ids().into_iter().collect();
-    let annotated: HashSet<String> = annotated
-        .into_iter()
-        .filter(|id| known.contains(id))
-        .collect();
-
-    let progress = make_progress(annotated.len() as u64, interactive);
-    progress.set_message("Downloading annotations...");
-    let mut synced = 0usize;
-    let mut errors = Vec::new();
-    for bookmark_id in &annotated {
-        match client.annotations(bookmark_id).await {
-            Ok(annotations) => {
-                synced += annotations.len();
-                cache.set_annotations(bookmark_id, annotations);
-            }
-            Err(err) => errors.push(format!("{bookmark_id}: {err}")),
-        }
-        progress.inc(1);
-    }
-    for bookmark_id in &known {
-        if !annotated.contains(bookmark_id) {
-            cache.set_annotations(bookmark_id, Vec::new());
-        }
-    }
-    progress.finish_with_message(format!("Synced {synced} annotation(s)"));
-
-    if !errors.is_empty() {
-        for error in &errors {
-            eprintln!("{error}");
-        }
-        bail!("{} annotation list(s) failed to sync", errors.len());
-    }
-    Ok(())
-}
-
-async fn download_articles(
-    client: &ReadeckClient,
-    cache_dir: &Path,
-    bookmarks: Vec<Bookmark>,
-    interactive: bool,
-) -> Result<()> {
-    let articles: Vec<Bookmark> = bookmarks
-        .into_iter()
-        .filter(|bookmark| bookmark.has_article)
-        .collect();
-    if interactive && articles.is_empty() {
-        eprintln!("No articles to sync.");
-        return Ok(());
-    }
-
-    let progress = make_progress(articles.len() as u64, interactive);
-    let mut errors = Vec::new();
-    let mut synced = 0;
-    progress.set_message("Downloading bookmarks...");
-    for bookmark in articles {
-        let title = bookmark.display_title();
-        match client.article(&bookmark.id).await {
-            Ok(html) => {
-                match Cache::write_article_to_dir(
-                    cache_dir,
-                    &bookmark.id,
-                    &html,
-                ) {
-                    Ok(()) => synced += 1,
-                    Err(err) => errors.push(format!("{title}: {err:#}")),
-                }
-            }
-            Err(err) => errors.push(format!("{title}: {err}")),
-        }
-        progress.inc(1);
-    }
-    progress.finish_with_message(format!("Synced {synced} article(s)"));
-
-    if !errors.is_empty() {
-        for error in &errors {
-            eprintln!("{error}");
-        }
-        bail!("{} article(s) failed to sync", errors.len());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{Annotation, BookmarkPatch};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
-    fn args(
-        unread: bool,
-        favorites: bool,
-        archived: bool,
-        all: bool,
-    ) -> SyncArgs {
-        SyncArgs {
-            unread,
-            favorites,
-            archived,
-            all,
+    #[tokio::test]
+    async fn fetch_metadata_uses_the_change_log_and_sync_endpoint() {
+        let changes = r#"[
+            {"id":"one","time":"2026-11-23T10:00:00Z","type":"update"},
+            {"id":"gone","time":"2026-11-23T10:01:00Z","type":"delete"}
+        ]"#;
+        let multipart = multipart_body(&[
+            ("json", "", "{\"id\":\"one\",\"title\":\"Fetched\",\"word_count\":3}"),
+        ]);
+        let (base, requests) = serve(vec![
+            http_response(
+                "Date: Mon, 23 Nov 2026 10:02:00 GMT\r\n",
+                changes,
+            ),
+            multipart_response(&multipart),
+        ])
+        .await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        let since = DateTime::parse_from_rfc3339("2026-11-23T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let batch = fetch_metadata(&client, Some(since)).await.unwrap();
+        assert!(!batch.snapshot);
+        assert_eq!(batch.removed, vec!["gone".to_string()]);
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].display_title(), "Fetched");
+        assert_eq!(
+            batch.watermark.unwrap().to_rfc3339(),
+            "2026-11-23T10:02:00+00:00"
+        );
+        let requests = requests.await.unwrap();
+        assert!(requests[0].starts_with("GET /api/bookmarks/sync?since="));
+        assert!(requests[1].starts_with("POST /api/bookmarks/sync "));
+        assert!(requests[1].contains("\"with_json\":true"));
+    }
+
+    #[tokio::test]
+    async fn fetch_content_caches_markdown_resources_and_html() {
+        let dir = std::env::temp_dir()
+            .join(format!("eckly-sync-content-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let multipart = multipart_body(&[
+            ("markdown", "", "# Hello\n\n![pic](pic.png)\n"),
+            ("html", "", "<h1>Hello</h1>"),
+            ("resource", "Path: pic.png\r\nGroup: embedded\r\n", "PNG"),
+        ]);
+        let (base, _requests) =
+            serve(vec![multipart_response(&multipart)]).await;
+        let client = ReadeckClient::new(&base, "secret-token").unwrap();
+        let bookmark = Bookmark {
+            id: "one".into(),
+            has_article: true,
+            loaded: true,
+            state: 1,
+            word_count: 2,
+            updated: Some(Utc::now()),
+            ..Default::default()
+        };
+        let batch =
+            fetch_content(&client, &dir, &[bookmark], true, false).await;
+        assert!(batch.errors.is_empty(), "{:?}", batch.errors);
+        assert_eq!(batch.synced.len(), 1);
+        assert_eq!(
+            Cache::read_markdown_from_dir(&dir, "one").as_deref(),
+            Some("# Hello\n\n![pic](pic.png)\n")
+        );
+        assert_eq!(
+            Cache::read_article_from_dir(&dir, "one").as_deref(),
+            Some("<h1>Hello</h1>")
+        );
+        let cache = Cache::new(dir.clone());
+        assert_eq!(
+            cache.read_resource("one", "pic.png").as_deref(),
+            Some(b"PNG" as &[u8])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn multipart_body(parts: &[(&str, &str, &str)]) -> String {
+        let mut body = String::new();
+        for (kind, headers, content) in parts {
+            body.push_str("--eckly-boundary\r\n");
+            body.push_str("Bookmark-Id: one\r\n");
+            body.push_str(&format!("Type: {kind}\r\n"));
+            body.push_str(headers);
+            body.push_str("\r\n");
+            body.push_str(content);
+            body.push_str("\r\n");
         }
+        body.push_str("--eckly-boundary--\r\n");
+        body
+    }
+
+    fn http_response(headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn multipart_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: multipart/mixed; boundary=\"eckly-boundary\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    async fn serve(
+        responses: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut header_end = None;
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    if header_end.is_none() {
+                        header_end = find_header_end(&request);
+                    }
+                    if let Some(end) = header_end {
+                        let length = content_length(&request[..end]).unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests
+                    .push(String::from_utf8_lossy(&request).to_string());
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.ok();
+            }
+            requests
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn find_header_end(bytes: &[u8]) -> Option<usize> {
+        bytes.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &[u8]) -> Option<usize> {
+        let headers = String::from_utf8_lossy(headers);
+        headers.lines().find_map(|line| {
+            line.strip_prefix("Content-Length:")
+                .or_else(|| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse().ok())
+        })
     }
 
     #[test]
@@ -638,34 +675,32 @@ mod tests {
     }
 
     #[test]
-    fn builds_filter_selection() {
+    fn content_flags_select_lists() {
+        let args = |unread, favorites, archived, all| SyncArgs {
+            unread,
+            favorites,
+            archived,
+            all,
+        };
+        assert!(args(false, false, false, false)
+            .content_filters()
+            .is_empty());
         assert_eq!(
-            filters_for(&args(true, false, false, false)),
+            args(true, false, false, false).content_filters(),
             vec![Filter::Unread]
         );
         assert_eq!(
-            filters_for(&args(true, true, false, false)),
-            vec![Filter::Unread, Filter::Marked]
+            args(false, true, false, false).content_filters(),
+            vec![Filter::Marked]
         );
         assert_eq!(
-            filters_for(&args(false, false, true, true)),
-            vec![Filter::All]
-        );
-        assert_eq!(
-            filters_for(&args(false, false, true, false)),
+            args(false, false, true, false).content_filters(),
             vec![Filter::Archived]
         );
-    }
-
-    #[test]
-    fn no_flags_selects_the_whole_library() {
-        let incremental = args(false, false, false, false);
-        assert!(incremental.incremental());
-        assert_eq!(filters_for(&incremental), vec![Filter::All]);
-        assert!(is_complete_snapshot(&filters_for(&incremental)));
-        assert!(!is_complete_snapshot(&filters_for(&args(
-            true, false, false, false
-        ))));
+        assert_eq!(
+            args(false, false, false, true).content_filters(),
+            vec![Filter::All]
+        );
     }
 
     #[test]
@@ -699,7 +734,6 @@ mod tests {
         .unwrap();
         let changes = latest_changes(changes);
         assert_eq!(changes.len(), 2);
-        // Sorted by time: two, then the newest change for one.
         assert_eq!(changes[0].id, "two");
         assert_eq!(changes[1].id, "one");
         assert_eq!(changes[1].kind, SyncChangeKind::Delete);
@@ -707,31 +741,60 @@ mod tests {
     }
 
     #[test]
-    fn fetches_only_missing_or_changed_articles() {
+    fn metadata_batch_applies_updates_deletes_and_pending_patches() {
         let dir = std::env::temp_dir()
-            .join(format!("eckly-sync-test-{}", std::process::id()));
+            .join(format!("eckly-sync-meta-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let cache = Cache::new(dir.clone());
-        cache.write_article("stable", "<p>stable</p>").unwrap();
-        cache.write_article("touched", "<p>old</p>").unwrap();
+        let mut cache = Cache::new(dir.clone());
+        cache.upsert_bookmarks(&[
+            Bookmark {
+                id: "keep".into(),
+                title: Some("Old".into()),
+                ..Default::default()
+            },
+            Bookmark {
+                id: "gone".into(),
+                ..Default::default()
+            },
+            Bookmark {
+                id: "stale".into(),
+                ..Default::default()
+            },
+        ]);
+        cache.queue_patch(
+            "keep",
+            &BookmarkPatch {
+                title: Some("Local".into()),
+                ..Default::default()
+            },
+        );
+        cache.set_annotations("gone", vec![Annotation::default()]);
 
-        let bookmark = |id: &str, has_article: bool| Bookmark {
-            id: id.into(),
-            has_article,
-            ..Default::default()
-        };
-        let changed: HashSet<String> =
-            ["touched".to_string()].into_iter().collect();
+        let watermark = DateTime::parse_from_rfc3339("2026-11-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        apply_metadata(
+            &mut cache,
+            MetadataBatch {
+                updates: vec![Bookmark {
+                    id: "keep".into(),
+                    title: Some("Remote".into()),
+                    ..Default::default()
+                }],
+                removed: vec!["gone".into()],
+                watermark: Some(watermark),
+                snapshot: true,
+            },
+        )
+        .unwrap();
 
-        // Cached and unchanged: keep the local copy.
-        assert!(!needs_article(&bookmark("stable", true), &changed, &cache));
-        // Cached but changed on the server: refresh it.
-        assert!(needs_article(&bookmark("touched", true), &changed, &cache));
-        // Never downloaded: fetch it.
-        assert!(needs_article(&bookmark("new", true), &changed, &cache));
-        // Nothing to download.
-        assert!(!needs_article(&bookmark("new", false), &changed, &cache));
-
+        assert_eq!(cache.bookmark_ids(), vec!["keep".to_string()]);
+        assert_eq!(
+            cache.bookmark_ref("keep").unwrap().title.as_deref(),
+            Some("Local")
+        );
+        assert_eq!(cache.last_sync(), Some(watermark));
+        assert!(!dir.join("content").join("gone.md").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

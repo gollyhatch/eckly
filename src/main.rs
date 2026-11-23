@@ -32,7 +32,7 @@ use crate::config::Config;
     after_help = "Configuration is read from the config file, then overridden by --server/--token \
                   and the READECK_URL, READECK_TOKEN and READECK_API_TOKEN environment variables.\n\
                   Themes: opaline builtins; use --theme, ECKLY_THEME or --list-themes.\n\
-                  Use `eckly sync --help` to cache articles for offline reading.\n\
+                  Use `eckly sync --help` to cache metadata and content for offline reading.\n\
                   Use --offline to browse the local cache without contacting Readeck.\n\
                   Run without credentials to use the interactive setup screen."
 )]
@@ -70,7 +70,7 @@ enum Commands {
     /// Add a bookmark for a URL and exit
     Add(add::AddArgs),
 
-    /// Sync the local cache for offline reading (changed bookmarks by default)
+    /// Sync bookmark metadata and optionally cache articles
     Sync(sync::SyncArgs),
 }
 

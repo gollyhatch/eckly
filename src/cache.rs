@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -29,6 +29,9 @@ struct CacheState {
     /// Annotations downloaded by the last sync, by bookmark.
     #[serde(default)]
     annotations: HashMap<String, Vec<Annotation>>,
+    /// Content-relevant metadata at the time Markdown/resources were cached.
+    #[serde(default)]
+    content_signatures: HashMap<String, String>,
     /// Server time of the newest change covered by the last incremental sync.
     #[serde(default)]
     last_sync: Option<DateTime<Utc>>,
@@ -56,6 +59,7 @@ impl CacheState {
             profile: None,
             pending: PendingChanges::default(),
             annotations: HashMap::new(),
+            content_signatures: HashMap::new(),
             last_sync: None,
         }
     }
@@ -290,12 +294,34 @@ impl Cache {
         self.state.bookmarks.keys().cloned().collect()
     }
 
+    pub fn bookmarks(&self) -> Vec<Bookmark> {
+        self.state.bookmarks.values().cloned().collect()
+    }
+
     pub fn last_sync(&self) -> Option<DateTime<Utc>> {
         self.state.last_sync
     }
 
     pub fn set_last_sync(&mut self, at: DateTime<Utc>) {
         self.state.last_sync = Some(at);
+    }
+
+    pub fn set_content(&mut self, id: &str, signature: String) {
+        self.state
+            .content_signatures
+            .insert(id.to_string(), signature);
+    }
+
+    /// True when cached Markdown exists and is at least as new as the
+    /// bookmark metadata.
+    pub fn has_fresh_content(&self, bookmark: &Bookmark) -> bool {
+        if !self.has_markdown(&bookmark.id) || !self.has_article(&bookmark.id) {
+            return false;
+        }
+        self.state
+            .content_signatures
+            .get(&bookmark.id)
+            .is_some_and(|signature| *signature == content_signature(bookmark))
     }
 
     /// Drop every cached bookmark, and its article, that is no longer on the
@@ -373,8 +399,10 @@ impl Cache {
     pub fn remove_bookmark(&mut self, id: &str) {
         self.state.bookmarks.remove(id);
         self.state.annotations.remove(id);
+        self.state.content_signatures.remove(id);
         self.state.pending.updates.remove(id);
         self.state.pending.deletes.remove(id);
+        let _ = self.remove_content(id);
         let _ = self.remove_article(id);
     }
 
@@ -387,11 +415,93 @@ impl Cache {
     }
 
     pub fn article_path_for(dir: &Path, id: &str) -> PathBuf {
-        let safe: String = id
-            .chars()
-            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-            .collect();
-        dir.join("articles").join(format!("{safe}.html"))
+        dir.join("articles")
+            .join(format!("{}.html", safe_id(id)))
+    }
+
+    pub fn markdown_path_for(dir: &Path, id: &str) -> PathBuf {
+        dir.join("content").join(format!("{}.md", safe_id(id)))
+    }
+
+    pub fn resource_dir_for(dir: &Path, id: &str) -> PathBuf {
+        dir.join("resources").join(safe_id(id))
+    }
+
+    pub fn resource_path_for(
+        dir: &Path,
+        id: &str,
+        resource: &str,
+    ) -> Option<PathBuf> {
+        let mut relative = PathBuf::new();
+        for component in Path::new(resource).components() {
+            if let Component::Normal(part) = component {
+                relative.push(part);
+            }
+        }
+        if relative.as_os_str().is_empty() {
+            return None;
+        }
+        Some(Self::resource_dir_for(dir, id).join(relative))
+    }
+
+    pub fn has_markdown(&self, id: &str) -> bool {
+        Self::markdown_path_for(&self.dir, id).exists()
+    }
+
+    pub fn read_markdown(&self, id: &str) -> Option<String> {
+        fs::read_to_string(Self::markdown_path_for(&self.dir, id)).ok()
+    }
+
+    pub fn read_markdown_from_dir(dir: &Path, id: &str) -> Option<String> {
+        fs::read_to_string(Self::markdown_path_for(dir, id)).ok()
+    }
+
+    pub fn read_article_from_dir(dir: &Path, id: &str) -> Option<String> {
+        fs::read_to_string(Self::article_path_for(dir, id)).ok()
+    }
+
+    pub fn read_resource(&self, id: &str, resource: &str) -> Option<Vec<u8>> {
+        let path = Self::resource_path_for(&self.dir, id, resource)?;
+        fs::read(path).ok()
+    }
+
+    pub fn write_markdown_to_dir(
+        dir: &Path,
+        id: &str,
+        markdown: &str,
+    ) -> Result<()> {
+        write_atomic(&Self::markdown_path_for(dir, id), markdown.as_bytes())
+    }
+
+    pub fn write_resource_to_dir(
+        dir: &Path,
+        id: &str,
+        resource: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let path = Self::resource_path_for(dir, id, resource)
+            .with_context(|| format!("invalid resource path {resource}"))?;
+        write_atomic(&path, bytes)
+    }
+
+    pub fn remove_content(&self, id: &str) -> Result<()> {
+        Self::remove_content_from_dir(&self.dir, id)
+    }
+
+    pub fn remove_content_from_dir(dir: &Path, id: &str) -> Result<()> {
+        let markdown = Self::markdown_path_for(dir, id);
+        if markdown.exists() {
+            fs::remove_file(&markdown).with_context(|| {
+                format!("could not remove {}", markdown.display())
+            })?;
+        }
+        let resources = Self::resource_dir_for(dir, id);
+        if resources.exists() {
+            fs::remove_dir_all(&resources).with_context(|| {
+                format!("could not remove {}", resources.display())
+            })?;
+        }
+        Ok(())
     }
 
     pub fn read_article(&self, id: &str) -> Option<String> {
@@ -478,6 +588,40 @@ impl Cache {
     }
 }
 
+pub fn content_signature(bookmark: &Bookmark) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        bookmark.has_article,
+        bookmark.loaded,
+        bookmark.state,
+        bookmark.word_count
+    )
+}
+
+fn safe_id(id: &str) -> String {
+    id.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .collect()
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("could not create cache dir {}", parent.display())
+        })?;
+    }
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cache".into());
+    let temporary = path.with_file_name(format!(".{name}.tmp"));
+    fs::write(&temporary, bytes)
+        .with_context(|| format!("could not write {}", temporary.display()))?;
+    fs::rename(&temporary, path)
+        .with_context(|| format!("could not replace {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,6 +663,32 @@ mod tests {
         assert!(cache.pending_updates().is_empty());
         assert_eq!(cache.pending_deletes(), vec!["one".to_string()]);
         assert_eq!(cache.pending_count(), 1);
+    }
+
+    #[test]
+    fn caches_markdown_and_resources() {
+        let mut cache = temp_cache();
+        Cache::write_markdown_to_dir(cache.dir(), "one", "# Title\n").unwrap();
+        Cache::write_resource_to_dir(cache.dir(), "one", "pic.png", b"PNG")
+            .unwrap();
+        Cache::write_article_to_dir(cache.dir(), "one", "<h1>Title</h1>")
+            .unwrap();
+
+        assert_eq!(cache.read_markdown("one").as_deref(), Some("# Title\n"));
+        assert_eq!(cache.read_resource("one", "pic.png").as_deref(), Some(b"PNG" as &[u8]));
+        let bookmark = Bookmark {
+            id: "one".into(),
+            has_article: true,
+            updated: Some(chrono::Utc::now()),
+            ..Default::default()
+        };
+        cache.set_content("one", content_signature(&bookmark));
+        assert!(cache.has_fresh_content(&bookmark));
+
+        cache.remove_content("one").unwrap();
+        assert!(!cache.has_markdown("one"));
+        assert!(cache.read_resource("one", "pic.png").is_none());
+        assert!(!cache.has_fresh_content(&bookmark));
     }
 
     #[test]

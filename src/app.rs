@@ -12,10 +12,13 @@ use ratatui_image::sliced::{SignedPosition, SlicedProtocol};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{ApiError, OAuthDevice, OAuthPoll, ReadeckClient};
-use crate::article::{Article, BlockKind, parse_article};
+use crate::article::{
+    Article, BlockKind, MarkdownSource, parse_article, parse_markdown,
+    strip_markdown_frontmatter,
+};
 use crate::cache::Cache;
 use crate::config::{Config, normalize_server, normalize_url};
-use crate::event::{ApiEvent, Event, PendingSyncResult};
+use crate::event::{ApiEvent, Event, LoadedArticle, PendingSyncResult};
 use crate::graphics::{self, Graphic};
 use crate::input::TextInput;
 use crate::models::{
@@ -157,6 +160,10 @@ pub struct Reader {
     pub flash: Option<FlashWord>,
     /// Highlights on the article.
     pub annotations: Vec<Annotation>,
+    /// Markdown source when the article came from a Markdown export.
+    pub markdown: Option<String>,
+    /// HTML sidecar used only to map Readeck annotation selectors.
+    pub html_article: Option<Article>,
     /// Text selection in progress.
     pub selection: Option<Selection>,
     /// Set when `terminal_graphics` is on.
@@ -209,6 +216,8 @@ impl Reader {
             speed: None,
             flash: None,
             annotations: Vec::new(),
+            markdown: None,
+            html_article: None,
             selection: None,
             graphics: None,
             graphics_encoded: HashMap::new(),
@@ -832,6 +841,11 @@ impl Reader {
     /// copied text keeps its structure, and consecutive code lines share one
     /// fenced block.
     pub fn selection_markdown(&self) -> Option<String> {
+        if let Some(markdown) = &self.markdown {
+            if let Some(text) = self.markdown_selection(markdown) {
+                return Some(text);
+            }
+        }
         let (start, end) = self.selected_bounds()?;
         if start == end {
             return None;
@@ -911,6 +925,35 @@ impl Reader {
         Some(render_markdown(chunks))
     }
 
+    /// Slice the original Markdown for the current selection.
+    fn markdown_selection(&self, markdown: &str) -> Option<String> {
+        let (start, end) = self.selected_bounds()?;
+        if start == end {
+            return None;
+        }
+        let (start_block, start_char) = self.block_char(start)?;
+        let (end_block, end_char) = self.block_char(end)?;
+        let start_source = self
+            .article
+            .as_ref()?
+            .markdown_sources
+            .get(start_block)?
+            .as_ref()?;
+        let end_source = self
+            .article
+            .as_ref()?
+            .markdown_sources
+            .get(end_block)?
+            .as_ref()?;
+        let from = markdown_offset(start_source, start_char, markdown);
+        let to = markdown_offset_end(end_source, end_char, markdown);
+        if from >= to || to > markdown.len() {
+            return None;
+        }
+        let text = markdown.get(from..to)?.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    }
+
     /// Readeck selectors and offsets for the current selection.
     pub fn annotation_selection(
         &self,
@@ -966,6 +1009,9 @@ impl Reader {
         annotation: &Annotation,
     ) -> Option<Vec<(usize, usize, usize)>> {
         let article = self.article.as_ref()?;
+        if article.sources.iter().all(Option::is_none) {
+            return self.annotation_text_ranges(annotation);
+        }
         let start_index = article.sources.iter().position(|source| {
             source
                 .as_ref()
@@ -1034,9 +1080,42 @@ impl Reader {
         }
     }
 
+    fn annotation_text_ranges(
+        &self,
+        annotation: &Annotation,
+    ) -> Option<Vec<(usize, usize, usize)>> {
+        let needle = normalize_space(&annotation.text);
+        if needle.is_empty() {
+            return None;
+        }
+        let article = self.article.as_ref()?;
+        for (index, block) in article.blocks.iter().enumerate() {
+            let found = block
+                .text
+                .find(&needle)
+                .or_else(|| {
+                    block
+                        .text
+                        .to_lowercase()
+                        .find(&needle.to_lowercase())
+                });
+            if let Some(byte) = found {
+                let start =
+                    block.text[..byte.min(block.text.len())].chars().count();
+                return Some(vec![(index, start, start + needle.chars().count())]);
+            }
+        }
+        None
+    }
+
     /// Block index an annotation belongs to.
     pub fn annotation_block(&self, annotation: &Annotation) -> Option<usize> {
         let article = self.article.as_ref()?;
+        if article.sources.iter().all(Option::is_none) {
+            return self
+                .annotation_text_ranges(annotation)
+                .and_then(|ranges| ranges.first().map(|range| range.0));
+        }
         article.sources.iter().position(|source| {
             source.as_ref().is_some_and(|source| {
                 annotation.start_selector == source.path
@@ -1259,6 +1338,7 @@ pub struct App {
     tx: UnboundedSender<Event>,
     clipboard: Option<arboard::Clipboard>,
     list_seq: u64,
+    sync_running: bool,
     pending_select: Option<String>,
     oauth_seq: u64,
     pending_sync_running: bool,
@@ -1327,6 +1407,7 @@ impl App {
             tx,
             clipboard: None,
             list_seq: 0,
+            sync_running: false,
             pending_select: None,
             oauth_seq: 0,
             pending_sync_running: false,
@@ -2531,6 +2612,12 @@ impl App {
             self.show_cached_bookmarks(false);
             return;
         }
+        if !self.needs_remote_list() {
+            if !append {
+                self.request_local_bookmarks(preserve_selection);
+            }
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -2576,6 +2663,50 @@ impl App {
             let _ = tx.send(Event::api(ApiEvent::Bookmarks {
                 seq,
                 append,
+                result,
+            }));
+        });
+    }
+
+    fn needs_remote_list(&self) -> bool {
+        !self.search.trim().is_empty()
+            || matches!(self.filter, Filter::Collection { .. })
+    }
+
+    fn request_local_bookmarks(&mut self, preserve_selection: bool) {
+        if self.sync_running {
+            return;
+        }
+        self.list_seq = self.list_seq.wrapping_add(1);
+        let selected = preserve_selection
+            .then(|| self.selected_bookmark().map(|bookmark| bookmark.id))
+            .flatten();
+        self.pending_select = selected.clone();
+        if !preserve_selection {
+            self.selected_ids.clear();
+        }
+        self.loading_list = true;
+        self.loading_more = false;
+        self.list_error = None;
+        self.show_cached_bookmarks(false);
+        self.pending_select = selected;
+        let seq = self.list_seq;
+        self.request_sync(seq, preserve_selection);
+    }
+
+    fn request_sync(&mut self, seq: u64, preserve_selection: bool) {
+        let Some(client) = self.client.clone() else {
+            self.loading_list = false;
+            return;
+        };
+        let since = self.cache.as_ref().and_then(|cache| cache.last_sync());
+        self.sync_running = true;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = crate::sync::fetch_metadata(&client, since).await;
+            let _ = tx.send(Event::api(ApiEvent::Synced {
+                seq,
+                preserve_selection,
                 result,
             }));
         });
@@ -2804,11 +2935,21 @@ impl App {
             .map(|cache| cache.annotations(&bookmark.id))
             .unwrap_or_default();
         if self.offline_mode {
-            let cached = self
+            let cached = self.cache.as_ref().and_then(|cache| {
+                let markdown = cache.read_markdown(&bookmark.id)?;
+                Some((markdown, cache.read_article(&bookmark.id)))
+            });
+            if let Some((markdown, html)) = cached {
+                let markdown = strip_markdown_frontmatter(&markdown);
+                reader.markdown = Some(markdown.to_string());
+                reader.html_article = html.map(|html| parse_article(&html));
+                reader.set_article(parse_markdown(markdown));
+            } else if let Some(html) = self
                 .cache
                 .as_ref()
-                .and_then(|cache| cache.read_article(&bookmark.id));
-            if let Some(html) = cached {
+                .and_then(|cache| cache.read_article(&bookmark.id))
+            {
+                reader.html_article = Some(parse_article(&html));
                 reader.set_article(parse_article(&html));
             } else if bookmark
                 .description
@@ -2828,18 +2969,68 @@ impl App {
                 );
             }
             self.reader = Some(reader);
+            self.request_reader_images(&bookmark.id);
             self.apply_pending_highlight();
             return;
         }
         if bookmark.has_article {
             self.reader = Some(reader);
-            self.request_article(&bookmark.id);
+            if !self.load_fresh_cached_article(&bookmark) {
+                self.request_article(&bookmark.id);
+            }
         } else {
             reader.set_article(fallback_article(&bookmark));
             self.reader = Some(reader);
         }
         self.request_annotations(&bookmark.id);
         self.apply_pending_highlight();
+    }
+
+    fn load_fresh_cached_article(&mut self, bookmark: &Bookmark) -> bool {
+        let cached = self.cache.as_ref().and_then(|cache| {
+            if !cache.has_fresh_content(bookmark) {
+                return None;
+            }
+            let markdown = cache.read_markdown(&bookmark.id)?;
+            Some((markdown, cache.read_article(&bookmark.id)))
+        });
+        let Some((markdown, html)) = cached else {
+            return false;
+        };
+        let markdown = strip_markdown_frontmatter(&markdown);
+        if let Some(reader) = &mut self.reader {
+            reader.markdown = Some(markdown.to_string());
+            reader.html_article = html.map(|html| parse_article(&html));
+            reader.set_article(parse_markdown(markdown));
+        }
+        self.request_reader_images(&bookmark.id);
+        true
+    }
+
+    fn request_reader_images(&mut self, bookmark_id: &str) {
+        if !self.images_enabled {
+            return;
+        }
+        let urls = self
+            .reader
+            .as_ref()
+            .and_then(|reader| reader.article.as_ref())
+            .map(|article| {
+                let mut urls = article
+                    .images
+                    .values()
+                    .cloned()
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                urls.sort();
+                urls.truncate(12);
+                urls
+            })
+            .unwrap_or_default();
+        if !urls.is_empty() {
+            self.request_images_for_reader(bookmark_id.to_string(), urls);
+        }
     }
 
     fn request_article(&mut self, id: &str) {
@@ -2854,19 +3045,56 @@ impl App {
         let tx = self.tx.clone();
         let cache_dir =
             self.cache.as_ref().map(|cache| cache.dir().to_path_buf());
-        let requested = id.clone();
+        let loaded = self
+            .reader
+            .as_ref()
+            .map(|reader| reader.bookmark.clone());
         tokio::spawn(async move {
-            let result = match client.article(&requested).await {
-                Ok(html) => {
-                    if let Some(dir) = &cache_dir {
-                        let _ =
-                            Cache::write_article_to_dir(dir, &requested, &html);
-                    }
-                    Ok(parse_article(&html))
-                }
-                Err(err) => Err(err),
+            let Some(bookmark) = loaded else {
+                return;
             };
-            let _ = tx.send(Event::api(ApiEvent::Article { id, result }));
+            let Some(dir) = cache_dir else {
+                let _ = tx.send(Event::api(ApiEvent::Article {
+                    id,
+                    result: Err(ApiError::Sync(
+                        "no cache directory available".into(),
+                    )),
+                    signature: None,
+                }));
+                return;
+            };
+            let batch = crate::sync::fetch_content(
+                &client,
+                &dir,
+                std::slice::from_ref(&bookmark),
+                true,
+                false,
+            )
+            .await;
+            let signature =
+                batch.synced.first().map(|item| item.signature.clone());
+            let result = if let Some(error) = batch.errors.first() {
+                Err(ApiError::Sync(error.clone()))
+            } else {
+                match Cache::read_markdown_from_dir(&dir, &id) {
+                    Some(markdown) => {
+                        let body = strip_markdown_frontmatter(&markdown);
+                        let html = Cache::read_article_from_dir(&dir, &id)
+                            .map(|html| parse_article(&html));
+                        Ok(LoadedArticle {
+                            article: parse_markdown(body),
+                            html,
+                            markdown: Some(body.to_string()),
+                        })
+                    }
+                    None => Err(ApiError::NoArticle),
+                }
+            };
+            let _ = tx.send(Event::api(ApiEvent::Article {
+                id,
+                result,
+                signature,
+            }));
         });
     }
 
@@ -3044,19 +3272,45 @@ impl App {
     }
 
     fn spawn_image_requests(&mut self, bookmark_id: String, urls: Vec<String>) {
-        let Some(client) = self.client.clone() else {
+        let client = self.client.clone();
+        let cache_dir =
+            self.cache.as_ref().map(|cache| cache.dir().to_path_buf());
+        if client.is_none() && cache_dir.is_none() {
             return;
-        };
+        }
         for url in urls {
             let client = client.clone();
             let tx = self.tx.clone();
             let bookmark_id = bookmark_id.clone();
             let requested_url = url.clone();
+            let cache_dir = cache_dir.clone();
             tokio::spawn(async move {
-                let result = match client.fetch_media(&requested_url).await {
-                    Ok(bytes) => image::load_from_memory(&bytes)
-                        .map_err(|err| ApiError::Image(err.to_string())),
-                    Err(err) => Err(err),
+                let local = cache_dir.as_ref().and_then(|dir| {
+                    Cache::new(dir.clone()).read_resource(&bookmark_id, &url)
+                });
+                let result = if let Some(bytes) = local {
+                    image::load_from_memory(&bytes)
+                        .map_err(|err| ApiError::Image(err.to_string()))
+                } else if requested_url.starts_with('/')
+                    || requested_url.contains("://")
+                {
+                    if let Some(client) = client {
+                        match client.fetch_media(&requested_url).await {
+                            Ok(bytes) => image::load_from_memory(&bytes)
+                                .map_err(|err| {
+                                    ApiError::Image(err.to_string())
+                                }),
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        Err(ApiError::Image(
+                            "image is not in the local cache".into(),
+                        ))
+                    }
+                } else {
+                    Err(ApiError::Image(
+                        "image is not in the local cache".into(),
+                    ))
                 };
                 let _ = tx.send(Event::api(ApiEvent::Image {
                     bookmark_id,
@@ -4474,6 +4728,11 @@ impl App {
         }
 
         match event {
+            ApiEvent::Synced {
+                seq,
+                preserve_selection,
+                result,
+            } => self.handle_synced(seq, preserve_selection, result),
             ApiEvent::Bookmarks {
                 seq,
                 append,
@@ -4546,7 +4805,11 @@ impl App {
                     }
                 }
             }
-            ApiEvent::Article { id, result } => {
+            ApiEvent::Article {
+                id,
+                result,
+                signature,
+            } => {
                 if !self
                     .reader
                     .as_ref()
@@ -4555,8 +4818,15 @@ impl App {
                     return;
                 }
                 match result {
-                    Ok(article) => {
-                        let urls = article
+                    Ok(loaded) => {
+                        if let Some(cache) = &mut self.cache {
+                            if let Some(signature) = signature.clone() {
+                                cache.set_content(&id, signature);
+                                let _ = cache.save();
+                            }
+                        }
+                        let urls = loaded
+                            .article
                             .images
                             .values()
                             .cloned()
@@ -4565,7 +4835,9 @@ impl App {
                             .take(12)
                             .collect::<Vec<_>>();
                         if let Some(reader) = &mut self.reader {
-                            reader.set_article(article);
+                            reader.markdown = loaded.markdown;
+                            reader.html_article = loaded.html;
+                            reader.set_article(loaded.article);
                         }
                         if self.images_enabled {
                             self.request_images_for_reader(id, urls);
@@ -4578,7 +4850,11 @@ impl App {
                         }
                         if err.is_network() {
                             self.offline = true;
-                            let cached = self
+                            let cached_markdown = self
+                                .cache
+                                .as_ref()
+                                .and_then(|cache| cache.read_markdown(&id));
+                            let cached_html = self
                                 .cache
                                 .as_ref()
                                 .and_then(|cache| cache.read_article(&id));
@@ -4586,8 +4862,22 @@ impl App {
                                 .reader
                                 .as_ref()
                                 .map(|reader| reader.bookmark.clone());
-                            if let Some(html) = cached {
+                            if let Some(markdown) = cached_markdown {
+                                let body =
+                                    strip_markdown_frontmatter(&markdown);
                                 if let Some(reader) = &mut self.reader {
+                                    reader.markdown = Some(body.to_string());
+                                    reader.html_article =
+                                        cached_html.map(|html| parse_article(&html));
+                                    reader.set_article(parse_markdown(body));
+                                }
+                                self.toast_info(
+                                    "Offline — loaded cached article",
+                                );
+                            } else if let Some(html) = cached_html {
+                                if let Some(reader) = &mut self.reader {
+                                    reader.html_article =
+                                        Some(parse_article(&html));
                                     reader.set_article(parse_article(&html));
                                 }
                                 self.toast_info(
@@ -4999,6 +5289,53 @@ impl App {
         }
     }
 
+    fn handle_synced(
+        &mut self,
+        seq: u64,
+        _preserve_selection: bool,
+        result: Result<crate::sync::MetadataBatch, ApiError>,
+    ) {
+        self.sync_running = false;
+        if seq != self.list_seq {
+            return;
+        }
+        self.loading_list = false;
+        self.loading_more = false;
+        match result {
+            Ok(batch) => {
+                self.offline = false;
+                self.list_error = None;
+                let mut apply_error = None;
+                if let Some(cache) = &mut self.cache {
+                    if let Err(err) = crate::sync::apply_metadata(cache, batch)
+                    {
+                        apply_error = Some(format!("{err:#}"));
+                    }
+                }
+                self.show_cached_bookmarks(false);
+                if let Some(error) = apply_error {
+                    self.toast_error(format!(
+                        "Could not save synced bookmarks: {error}"
+                    ));
+                }
+                self.flush_pending_changes();
+            }
+            Err(err) => {
+                if self.handle_unauthorized(&err) {
+                    return;
+                }
+                if err.is_network() {
+                    self.offline = true;
+                    self.show_cached_bookmarks(true);
+                } else {
+                    let message = err.to_string();
+                    self.list_error = Some(message.clone());
+                    self.toast_error(message);
+                }
+            }
+        }
+    }
+
     fn handle_bookmarks(
         &mut self,
         seq: u64,
@@ -5082,11 +5419,13 @@ impl App {
             self.bookmarks.clear();
             self.total = 0;
             self.list_state.select(None);
-            self.list_error = Some(if self.offline_mode {
-                "Offline mode — no local cache available.".into()
+            self.list_error = if self.offline_mode {
+                Some("Offline mode — no local cache available.".into())
+            } else if self.offline {
+                Some("Offline — no cached bookmarks available.".into())
             } else {
-                "Offline — no cached bookmarks available.".into()
-            });
+                None
+            };
             return;
         };
 
@@ -5111,17 +5450,21 @@ impl App {
         self.selected_ids.retain(|id| {
             self.bookmarks.iter().any(|bookmark| &bookmark.id == id)
         });
-        self.list_error = Some(if self.bookmarks.is_empty() {
+        self.list_error = if self.bookmarks.is_empty() {
             if self.offline_mode {
-                "Offline mode — no cached bookmarks for this view.".into()
+                Some("Offline mode — no cached bookmarks for this view.".into())
+            } else if self.offline {
+                Some("Offline — no cached bookmarks for this view.".into())
             } else {
-                "Offline — no cached bookmarks for this view.".into()
+                None
             }
         } else if self.offline_mode {
-            "Offline mode — showing cached bookmarks.".into()
+            Some("Offline mode — showing cached bookmarks.".into())
+        } else if self.offline {
+            Some("Offline — showing cached bookmarks.".into())
         } else {
-            "Offline — showing cached bookmarks.".into()
-        });
+            None
+        };
         if notify {
             self.toast_info("Offline — using local cache");
         }
@@ -5491,6 +5834,128 @@ fn render_markdown(chunks: Vec<(BlockKind, String)>) -> String {
         index += 1;
     }
     out
+}
+
+fn normalize_space(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Find a plain-text selection in the HTML sidecar and return its Readeck
+/// selectors. Markdown has no DOM selectors, so annotations use this mapping.
+fn annotation_selection_for_text(
+    article: &Article,
+    text: &str,
+) -> Option<(String, usize, String, usize)> {
+    let needle = normalize_space(text);
+    if needle.is_empty() {
+        return None;
+    }
+    for (index, block) in article.blocks.iter().enumerate() {
+        let found = block.text.find(&needle).or_else(|| {
+            block.text.to_lowercase().find(&needle.to_lowercase())
+        })?;
+        let start_char =
+            block.text[..found.min(block.text.len())].chars().count();
+        let end_char = start_char + needle.chars().count();
+        let Some(source) = article.sources.get(index).and_then(|s| s.as_ref())
+        else {
+            continue;
+        };
+        let start_offset = source
+            .offsets
+            .get(start_char)
+            .copied()
+            .unwrap_or_else(|| source.offsets.last().copied().unwrap_or(0));
+        let end_offset = source
+            .offsets
+            .get(end_char)
+            .copied()
+            .unwrap_or(source.len);
+        if start_offset >= end_offset {
+            return None;
+        }
+        return Some((
+            source.path.clone(),
+            start_offset,
+            source.path.clone(),
+            end_offset,
+        ));
+    }
+    None
+}
+
+fn article_text_range(
+    article: &Article,
+    block: usize,
+    from: usize,
+    to: usize,
+) -> Option<String> {
+    let chars: Vec<char> =
+        article.blocks.get(block)?.text.chars().collect();
+    let from = from.min(chars.len());
+    let to = to.min(chars.len());
+    Some(chars[from..to].iter().collect())
+}
+
+fn find_text_in_article(
+    article: &Article,
+    text: &str,
+    from_block: usize,
+) -> Option<(usize, usize)> {
+    for (index, block) in article.blocks.iter().enumerate().skip(from_block) {
+        if let Some(byte) = block.text.find(text) {
+            let start_char = block.text[..byte].chars().count();
+            return Some((index, start_char));
+        }
+        if let Some(byte) = block.text.to_lowercase().find(&text.to_lowercase())
+        {
+            let start_char =
+                block.text[..byte.min(block.text.len())].chars().count();
+            return Some((index, start_char));
+        }
+    }
+    None
+}
+
+/// Byte offset in Markdown for the character at `char`.
+fn markdown_offset(
+    source: &MarkdownSource,
+    char: usize,
+    markdown: &str,
+) -> usize {
+    if char == 0 {
+        return source.start;
+    }
+    source.offsets.get(char).copied().unwrap_or_else(|| {
+        source
+            .offsets
+            .last()
+            .map(|offset| *offset + char_len(markdown, *offset))
+            .unwrap_or(source.start)
+    })
+}
+
+/// Byte offset in Markdown just past the character before `char`.
+fn markdown_offset_end(
+    source: &MarkdownSource,
+    char: usize,
+    markdown: &str,
+) -> usize {
+    if let Some(offset) = source.offsets.get(char) {
+        return *offset + char_len(markdown, *offset);
+    }
+    source
+        .offsets
+        .last()
+        .map(|offset| *offset + char_len(markdown, *offset))
+        .unwrap_or(source.start)
+}
+
+fn char_len(text: &str, offset: usize) -> usize {
+    text.get(offset..)
+        .and_then(|rest| rest.chars().next())
+        .map(char::len_utf8)
+        .unwrap_or(1)
 }
 
 fn parse_labels(value: &str) -> Vec<String> {
@@ -8037,6 +8502,80 @@ let y = 2;</code></pre>"#,
                 _ => panic!("expected an input modal"),
             }
         }
+    }
+
+    #[test]
+    fn online_list_reads_from_cache_before_syncing() {
+        let dir = std::env::temp_dir()
+            .join(format!("eckly-local-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cache = Cache::new(dir.clone());
+        cache.upsert_bookmarks(&[Bookmark {
+            id: "cached".into(),
+            title: Some("Cached".into()),
+            ..Default::default()
+        }]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::with_cache(
+            Config::default(),
+            PathBuf::from("/tmp/eckly-test"),
+            tx,
+            Some(cache),
+            false,
+        );
+        app.screen = Screen::Main;
+        app.request_bookmarks(false, false);
+        assert_eq!(app.bookmarks.len(), 1);
+        assert_eq!(app.bookmarks[0].id, "cached");
+        assert!(!app.loading_list);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn synced_batch_updates_the_cached_list() {
+        let dir = std::env::temp_dir()
+            .join(format!("eckly-synced-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cache = Cache::new(dir.clone());
+        cache.upsert_bookmarks(&[Bookmark {
+            id: "old".into(),
+            title: Some("Old".into()),
+            ..Default::default()
+        }]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::with_cache(
+            Config::default(),
+            PathBuf::from("/tmp/eckly-test"),
+            tx,
+            Some(cache),
+            false,
+        );
+        app.screen = Screen::Main;
+        app.loading_list = true;
+        app.list_seq = 7;
+        let watermark = chrono::Utc::now();
+        app.handle_synced(
+            7,
+            false,
+            Ok(crate::sync::MetadataBatch {
+                updates: vec![Bookmark {
+                    id: "new".into(),
+                    title: Some("New".into()),
+                    ..Default::default()
+                }],
+                removed: vec!["old".into()],
+                watermark: Some(watermark),
+                snapshot: true,
+            }),
+        );
+        assert!(!app.loading_list);
+        assert_eq!(app.bookmarks.len(), 1);
+        assert_eq!(app.bookmarks[0].id, "new");
+        assert_eq!(
+            app.cache.as_ref().unwrap().last_sync(),
+            Some(watermark)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
