@@ -958,6 +958,75 @@ impl Reader {
     pub fn annotation_selection(
         &self,
     ) -> Option<(String, usize, String, usize)> {
+        if let Some(selection) = self.article_annotation_selection() {
+            return Some(selection);
+        }
+        let html = self.html_article.as_ref()?;
+        if let Some(text) = self.selected_plain_text() {
+            if let Some(selection) = annotation_selection_for_text(html, &text) {
+                return Some(selection);
+            }
+        }
+        self.annotation_selection_from_html_bounds(html)
+    }
+
+    fn annotation_selection_from_html_bounds(
+        &self,
+        html: &Article,
+    ) -> Option<(String, usize, String, usize)> {
+        let (start, end) = self.selected_bounds()?;
+        if start == end {
+            return None;
+        }
+        let article = self.article.as_ref()?;
+        let (start_block, start_char) = self.block_char(start)?;
+        let (end_block, end_char) = self.block_char(end)?;
+        let start_snippet =
+            article_text_range(article, start_block, start_char, start_char + 80)?;
+        let end_snippet = article_text_range(
+            article,
+            end_block,
+            end_char.saturating_sub(80),
+            end_char.saturating_add(1),
+        )?;
+        let start_snippet = start_snippet.trim();
+        let end_snippet = end_snippet.trim();
+        if start_snippet.is_empty() || end_snippet.is_empty() {
+            return None;
+        }
+        let (start_index, start_pos) =
+            find_text_in_article(html, start_snippet, 0)?;
+        let (end_index, end_start) =
+            find_text_in_article(html, end_snippet, start_index)?;
+        let end_pos = end_start + end_snippet.chars().count();
+        let start_source = html.sources.get(start_index)?.as_ref()?;
+        let end_source = html.sources.get(end_index)?.as_ref()?;
+        let start_offset = start_source
+            .offsets
+            .get(start_pos)
+            .copied()
+            .unwrap_or_else(|| {
+                start_source.offsets.last().copied().unwrap_or(0)
+            });
+        let end_offset = end_source
+            .offsets
+            .get(end_pos)
+            .copied()
+            .unwrap_or(end_source.len);
+        if start_source.path == end_source.path && start_offset >= end_offset {
+            return None;
+        }
+        Some((
+            start_source.path.clone(),
+            start_offset,
+            end_source.path.clone(),
+            end_offset,
+        ))
+    }
+
+    fn article_annotation_selection(
+        &self,
+    ) -> Option<(String, usize, String, usize)> {
         let (start, end) = self.selected_bounds()?;
         if start == end {
             return None;
@@ -987,6 +1056,34 @@ impl Reader {
             end_source.path.clone(),
             end_offset,
         ))
+    }
+
+    fn selected_plain_text(&self) -> Option<String> {
+        let (start, end) = self.selected_bounds()?;
+        if start == end {
+            return None;
+        }
+        let article = self.article.as_ref()?;
+        let (start_block, start_char) = self.block_char(start)?;
+        let (end_block, end_char) = self.block_char(end)?;
+        let mut parts = Vec::new();
+        for index in start_block..=end_block {
+            let block = article.blocks.get(index)?;
+            let chars: Vec<char> = block.text.chars().collect();
+            let from = if index == start_block { start_char } else { 0 };
+            let to = if index == end_block {
+                end_char.saturating_add(1)
+            } else {
+                chars.len()
+            };
+            let from = from.min(chars.len());
+            let to = to.min(chars.len());
+            let text: String = chars[from..to].iter().collect();
+            if !text.trim().is_empty() {
+                parts.push(text);
+            }
+        }
+        Some(normalize_space(&parts.join(" ")))
     }
 
     /// Scroll to the first line of a block.
@@ -7062,6 +7159,123 @@ mod tests {
         assert_eq!(reader.selection.unwrap().cursor, pos(0, 4));
         reader.selection_word(true, false);
         assert_eq!(reader.selection.unwrap().cursor, pos(1, 0));
+    }
+
+    #[test]
+    fn reader_retry_uses_fresh_cached_content() {
+        let dir = std::env::temp_dir()
+            .join(format!("eckly-retry-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cache = Cache::new(dir.clone());
+        let bookmark = Bookmark {
+            id: "bm".into(),
+            has_article: true,
+            loaded: true,
+            state: 1,
+            word_count: 2,
+            ..Default::default()
+        };
+        cache.upsert_bookmarks(&[bookmark.clone()]);
+        Cache::write_markdown_to_dir(&dir, "bm", "# Cached\n").unwrap();
+        Cache::write_article_to_dir(&dir, "bm", "<h1>Cached</h1>").unwrap();
+        cache.set_content("bm", crate::cache::content_signature(&bookmark));
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::with_cache(
+            Config::default(),
+            PathBuf::from("/tmp/eckly-test"),
+            tx,
+            Some(cache),
+            false,
+        );
+        let mut reader = Reader::new(bookmark, false, 0, true);
+        reader.loading = false;
+        app.reader = Some(reader);
+        app.retry_article();
+        let reader = app.reader.as_ref().unwrap();
+        assert_eq!(reader.article.as_ref().unwrap().blocks[0].text, "Cached");
+        assert_eq!(reader.markdown.as_deref(), Some("# Cached\n"));
+        assert!(app.toast.as_ref().unwrap().text.contains("cached"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn annotation_selection_maps_multi_line_markdown_selection() {
+        let markdown = "one two\n\nthree four\n";
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                has_article: true,
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.html_article =
+            Some(parse_article("<p>one two</p><p>three four</p>"));
+        reader.markdown = Some(markdown.to_string());
+        reader.set_article(parse_markdown(markdown));
+        let first = reader
+            .lines
+            .iter()
+            .position(|line| line.block == Some(0))
+            .unwrap();
+        let second = reader
+            .lines
+            .iter()
+            .position(|line| line.block == Some(1))
+            .unwrap();
+        reader.selection = Some(Selection {
+            cursor: TextPos {
+                line: second,
+                offset: 4,
+            },
+            anchor: Some(TextPos {
+                line: first,
+                offset: 4,
+            }),
+        });
+        assert_eq!(
+            reader.annotation_selection(),
+            Some(("p[1]".into(), 4, "p[2]".into(), 5))
+        );
+    }
+
+    #[test]
+    fn selection_copy_uses_provided_markdown() {
+        let markdown = "# Heading\n\nBody text\n\n- First item\n";
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.markdown = Some(markdown.to_string());
+        reader.set_article(parse_markdown(markdown));
+
+        reader.selection = Some(Selection {
+            cursor: TextPos { line: 0, offset: 7 },
+            anchor: Some(TextPos { line: 0, offset: 0 }),
+        });
+        assert_eq!(
+            reader.selection_markdown().as_deref(),
+            Some("# Heading")
+        );
+
+        let line = reader
+            .lines
+            .iter()
+            .position(|line| line.block == Some(1))
+            .unwrap();
+        reader.selection = Some(Selection {
+            cursor: TextPos { line, offset: 4 },
+            anchor: Some(TextPos { line, offset: 0 }),
+        });
+        assert_eq!(reader.selection_markdown().as_deref(), Some("Body"));
     }
 
     #[test]
