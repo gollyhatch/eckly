@@ -632,6 +632,9 @@ fn selection_span(
     wrapped: &crate::article::WrappedLine,
 ) -> Option<(usize, usize)> {
     let (start, end) = bounds?;
+    if start == end {
+        return None;
+    }
     if line < start.line || line > end.line {
         return None;
     }
@@ -640,7 +643,11 @@ fn selection_span(
         .as_ref()
         .map(|range| range.end - range.start)?;
     let from = if line == start.line { start.offset } else { 0 };
-    let to = if line == end.line { end.offset } else { length };
+    let to = if line == end.line {
+        end.offset.saturating_add(1)
+    } else {
+        length
+    };
     let from = from.min(length);
     let to = to.min(length);
     if from >= to {

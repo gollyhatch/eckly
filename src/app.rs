@@ -1043,9 +1043,14 @@ impl Reader {
             .unwrap_or_else(|| {
                 start_source.offsets.last().copied().unwrap_or(0)
             });
-        let end_offset = match end_source.offsets.get(end_char) {
-            Some(offset) => *offset,
-            None => end_source.len,
+        let end_offset = if end_char < end_source.offsets.len() {
+            end_source
+                .offsets
+                .get(end_char + 1)
+                .copied()
+                .unwrap_or(end_source.len)
+        } else {
+            end_source.len
         };
         if start_source.path == end_source.path && start_offset >= end_offset {
             return None;
@@ -7065,7 +7070,7 @@ mod tests {
         reader.selection.as_mut().unwrap().anchor = Some(first);
         assert_eq!(
             reader.annotation_selection(),
-            Some(("p[1]".into(), 0, "p[1]".into(), 5))
+            Some(("p[1]".into(), 0, "p[1]".into(), 6))
         );
 
         // Extending into the next block uses both selectors.
@@ -7073,7 +7078,7 @@ mod tests {
             TextPos { line: 2, offset: 3 };
         assert_eq!(
             reader.annotation_selection(),
-            Some(("p[1]".into(), 0, "p[2]".into(), 3))
+            Some(("p[1]".into(), 0, "p[2]".into(), 4))
         );
 
         // Left at the start of a line moves to the previous line's end.
