@@ -12,7 +12,7 @@ use ratatui_image::sliced::{SignedPosition, SlicedProtocol};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{ApiError, OAuthDevice, OAuthPoll, ReadeckClient};
-use crate::article::{Article, parse_article};
+use crate::article::{Article, BlockKind, parse_article};
 use crate::cache::Cache;
 use crate::config::{Config, normalize_server, normalize_url};
 use crate::event::{ApiEvent, Event, PendingSyncResult};
@@ -826,6 +826,91 @@ impl Reader {
         })
     }
 
+    /// Markdown for the selected article text.
+    ///
+    /// Block prefixes (headings, list items, quotes) are restored so the
+    /// copied text keeps its structure, and consecutive code lines share one
+    /// fenced block.
+    pub fn selection_markdown(&self) -> Option<String> {
+        let (start, end) = self.selected_bounds()?;
+        if start == end {
+            return None;
+        }
+        let article = self.article.as_ref()?;
+        let (start_block, start_char) = self.block_char(start)?;
+        let (end_block, end_char) = self.block_char(end)?;
+        let mut chunks: Vec<(BlockKind, String)> = Vec::new();
+        for index in start_block..=end_block {
+            let Some(block) = article.blocks.get(index) else {
+                continue;
+            };
+            let chars: Vec<char> = block.text.chars().collect();
+            let from = if index == start_block { start_char } else { 0 };
+            let to = if index == end_block {
+                end_char
+            } else {
+                chars.len()
+            };
+            let from = from.min(chars.len());
+            let to = to.min(chars.len());
+            match block.kind {
+                BlockKind::Code => {
+                    if from < to {
+                        chunks.push((
+                            BlockKind::Code,
+                            chars[from..to].iter().collect(),
+                        ));
+                    }
+                }
+                BlockKind::ListItem => {
+                    let (prefix, marker) = markdown_list_prefix(&block.text);
+                    let from = from.max(marker).min(to);
+                    let text: String = chars[from..to].iter().collect();
+                    if !text.trim().is_empty() {
+                        chunks
+                            .push((BlockKind::ListItem, format!("{prefix}{text}")));
+                    }
+                }
+                BlockKind::Heading1
+                | BlockKind::Heading2
+                | BlockKind::Heading3
+                | BlockKind::Quote
+                | BlockKind::Paragraph
+                | BlockKind::Caption => {
+                    let text: String = chars[from..to].iter().collect();
+                    let text = text.trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let text = match block.kind {
+                        BlockKind::Heading1 => format!("# {text}"),
+                        BlockKind::Heading2 => format!("## {text}"),
+                        BlockKind::Heading3 => format!("### {text}"),
+                        BlockKind::Quote => format!("> {text}"),
+                        _ => text.to_string(),
+                    };
+                    chunks.push((block.kind, text));
+                }
+                BlockKind::Image => {
+                    let alt = block.text.trim();
+                    let text = match article.images.get(&index) {
+                        Some(url) => format!("![{alt}]({url})"),
+                        None if !alt.is_empty() => format!("[{alt}]"),
+                        None => continue,
+                    };
+                    chunks.push((BlockKind::Image, text));
+                }
+                BlockKind::Rule => {
+                    chunks.push((BlockKind::Rule, "---".to_string()));
+                }
+            }
+        }
+        if chunks.is_empty() {
+            return None;
+        }
+        Some(render_markdown(chunks))
+    }
+
     /// Readeck selectors and offsets for the current selection.
     pub fn annotation_selection(
         &self,
@@ -1172,6 +1257,7 @@ pub struct App {
     /// Annotation to scroll to once a bookmark's reader is ready.
     pending_highlight: Option<String>,
     tx: UnboundedSender<Event>,
+    clipboard: Option<arboard::Clipboard>,
     list_seq: u64,
     pending_select: Option<String>,
     oauth_seq: u64,
@@ -1239,6 +1325,7 @@ impl App {
             highlights: Vec::new(),
             pending_highlight: None,
             tx,
+            clipboard: None,
             list_seq: 0,
             pending_select: None,
             oauth_seq: 0,
@@ -3209,6 +3296,7 @@ impl App {
                     reader.selection_block(1);
                 }
             }
+            KeyCode::Char('y') => self.copy_selection_markdown(),
             KeyCode::Enter | KeyCode::Char(' ') => self.selection_press(),
             _ => {}
         }
@@ -3249,6 +3337,41 @@ impl App {
             }
             None => self.toast_error("Select at least one character"),
         }
+    }
+
+    fn copy_selection_markdown(&mut self) {
+        let Some(markdown) = self
+            .reader
+            .as_ref()
+            .and_then(Reader::selection_markdown)
+        else {
+            self.toast_error("No selection to copy");
+            return;
+        };
+        match self.copy_to_clipboard(markdown) {
+            Ok(()) => {
+                if let Some(reader) = &mut self.reader {
+                    reader.selection = None;
+                }
+                self.toast_success("Copied selection as markdown");
+            }
+            Err(err) => self.toast_error(format!("Could not copy: {err}")),
+        }
+    }
+
+    fn copy_to_clipboard(
+        &mut self,
+        text: String,
+    ) -> std::result::Result<(), String> {
+        if self.clipboard.is_none() {
+            self.clipboard = Some(
+                arboard::Clipboard::new().map_err(|err| err.to_string())?,
+            );
+        }
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            return Err("clipboard unavailable".into());
+        };
+        clipboard.set_text(text).map_err(|err| err.to_string())
     }
 
     fn create_annotation_span(
@@ -5285,6 +5408,60 @@ fn label_suggestions(
     suggestions
 }
 
+/// List marker and number of prefix characters for an article list item.
+fn markdown_list_prefix(text: &str) -> (&'static str, usize) {
+    if text.starts_with("• ") {
+        ("- ", 2)
+    } else if text.starts_with("◦ ") {
+        ("  - ", 2)
+    } else if text.starts_with("▪ ") {
+        ("    - ", 2)
+    } else {
+        ("- ", 0)
+    }
+}
+
+/// Render selected article blocks as Markdown, keeping lists tight and
+/// grouping consecutive code lines into one fenced block.
+fn render_markdown(chunks: Vec<(BlockKind, String)>) -> String {
+    let mut out = String::new();
+    let mut index = 0;
+    while index < chunks.len() {
+        let (kind, text) = &chunks[index];
+        if *kind == BlockKind::Code {
+            let mut lines = vec![text.clone()];
+            let mut next = index + 1;
+            while next < chunks.len() && chunks[next].0 == BlockKind::Code {
+                lines.push(chunks[next].1.clone());
+                next += 1;
+            }
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            let fence = if lines.iter().any(|line| line.contains("```")) {
+                "````"
+            } else {
+                "```"
+            };
+            out.push_str(fence);
+            out.push('\n');
+            out.push_str(&lines.join("\n"));
+            out.push('\n');
+            out.push_str(fence);
+            index = next;
+            continue;
+        }
+        if !out.is_empty() {
+            let tight = *kind == BlockKind::ListItem
+                && chunks[index - 1].0 == BlockKind::ListItem;
+            out.push_str(if tight { "\n" } else { "\n\n" });
+        }
+        out.push_str(text);
+        index += 1;
+    }
+    out
+}
+
 fn parse_labels(value: &str) -> Vec<String> {
     let mut labels = Vec::new();
     for part in value.split(',') {
@@ -6386,6 +6563,76 @@ mod tests {
         assert_eq!(reader.selection.unwrap().cursor, pos(0, 4));
         reader.selection_word(true, false);
         assert_eq!(reader.selection.unwrap().cursor, pos(1, 0));
+    }
+
+    #[test]
+    fn selection_markdown_keeps_block_structure() {
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.set_article(parse_article(
+            r#"<h2>Title</h2>
+            <ul><li>First item</li><li>Second item</li></ul>
+            <blockquote><p>Quoted text</p></blockquote>
+            <pre><code>let x = 1;
+let y = 2;</code></pre>"#,
+        ));
+        reader.viewport = 40;
+        reader.start_selection();
+        let first = reader.selection.unwrap().cursor;
+        let last = reader
+            .lines
+            .iter()
+            .rposition(|line| line.range.is_some())
+            .unwrap();
+        let end = reader.lines[last].range.as_ref().unwrap().len();
+        reader.selection = Some(Selection {
+            cursor: TextPos {
+                line: last,
+                offset: end,
+            },
+            anchor: Some(first),
+        });
+
+        assert_eq!(
+            reader.selection_markdown().unwrap(),
+            "## Title\n\n- First item\n- Second item\n\n> Quoted text\n\n```\nlet x = 1;\nlet y = 2;\n```"
+        );
+    }
+
+    #[test]
+    fn selection_markdown_handles_partial_list_items() {
+        let mut reader = Reader::new(
+            Bookmark {
+                id: "b1".into(),
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        reader.set_article(parse_article(
+            "<ul><li>First item</li><li>Second item</li></ul>",
+        ));
+        let line = reader
+            .lines
+            .iter()
+            .position(|line| line.block == Some(0))
+            .unwrap();
+        reader.selection = Some(Selection {
+            cursor: TextPos { line, offset: 7 },
+            anchor: Some(TextPos { line, offset: 2 }),
+        });
+        assert_eq!(reader.selection_markdown().unwrap(), "- First");
+
+        reader.selection.as_mut().unwrap().anchor = None;
+        assert!(reader.selection_markdown().is_none());
     }
 
     #[test]

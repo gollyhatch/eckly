@@ -396,7 +396,10 @@ or end of the line with `0`/`^`/`$`, and jump between paragraphs with `{`/`}`.
 `Enter` or `Space` sets the start of the selection and a second press finishes
 it. The selected text is highlighted as you move, and finishing creates a
 yellow highlight that you can give a note or another color from the list.
-Inline notes are hidden while selecting so they cannot end up in a selection.
+Press `y` instead of the second `Enter`/`Space` to copy the selection as
+Markdown without creating a highlight; headings, list items, quotes and code
+fences are preserved. Inline notes are hidden while selecting so they cannot
+end up in a selection.
 `Esc` cancels the selection.
 `eckly sync` downloads annotations too, so highlights stay visible offline;
 adding or editing them needs a connection to Readeck.

@@ -427,7 +427,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .areas(footer_area);
 
     let hints = if selecting {
-        "  h/j/k/l move · w/b/e words · W/B/E WORDS · 0/^/$ line · {/} paragraph · Enter/Space select · Esc cancel"
+        "  h/j/k/l move · w/b/e words · W/B/E WORDS · 0/^/$ line · {/} paragraph · Enter/Space select · y copy · Esc cancel"
     } else if speed_reading {
         "  Space pause/resume · h/l word · +/- words per minute · s or Esc back to article"
     } else {
