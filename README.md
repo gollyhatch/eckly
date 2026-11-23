@@ -280,7 +280,7 @@ first.
 | `Space` | Select / deselect the highlighted bookmark |
 | `Ctrl+a` | Select all bookmarks currently loaded in the list |
 | `PgDn` / `PgUp` | Move one page |
-| `Ctrl+d` / `Ctrl+u` | Move half a page |
+| `d` / `Ctrl+d`, `u` / `Ctrl+u` | Move half a page |
 | `g` / `G` | First / last bookmark |
 | `Enter` / `l` / `→` | Open the reader |
 | `Tab` / `h` / `←` | Focus the filter sidebar |
@@ -332,7 +332,7 @@ field terms are server-side only, so offline they are matched as plain text.
 | --- | --- |
 | `j` / `k` | Move between filters |
 | `PgUp` / `PgDn` | Move one page |
-| `Ctrl+u` / `Ctrl+d` | Move half a page |
+| `u` / `Ctrl+u`, `d` / `Ctrl+d` | Move half a page |
 | `g` / `G` | First / last filter |
 | `/` | Filter labels and collections |
 | `R` | Rename the selected label |
@@ -355,7 +355,7 @@ progress or archive status.
 | `Space` | Scroll to the next paragraph |
 | `PgDn` | Page down |
 | `PgUp` / `b` | Page up |
-| `Ctrl+d`, `Ctrl+u` | Half page down / up |
+| `d` / `Ctrl+d`, `u` / `Ctrl+u` | Half page down / up |
 | `g` / `G` | Top / bottom |
 | `/` | Search the article text |
 | `n` / `N` | Next / previous search match |

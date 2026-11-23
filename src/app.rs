@@ -2012,6 +2012,14 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.sidebar_move(1),
             KeyCode::Up | KeyCode::Char('k') => self.sidebar_move(-1),
+            KeyCode::Char('d') => {
+                let half = (self.sidebar_viewport / 2).max(1);
+                self.sidebar_move(half as isize);
+            }
+            KeyCode::Char('u') => {
+                let half = (self.sidebar_viewport / 2).max(1);
+                self.sidebar_move(-(half as isize));
+            }
             KeyCode::PageDown => {
                 let page = self.sidebar_viewport.max(1);
                 self.sidebar_move(page as isize);
@@ -2091,6 +2099,14 @@ impl App {
                 | KeyCode::Left => self.focus_sidebar(),
                 KeyCode::Down | KeyCode::Char('j') => self.list_move(1),
                 KeyCode::Up | KeyCode::Char('k') => self.list_move(-1),
+                KeyCode::Char('d') => {
+                    let half = (self.list_viewport / 2).max(1);
+                    self.list_move(half as isize);
+                }
+                KeyCode::Char('u') => {
+                    let half = (self.list_viewport / 2).max(1);
+                    self.list_move(-(half as isize));
+                }
                 KeyCode::PageDown => {
                     let page = self.list_viewport.max(1);
                     self.list_move(page as isize);
@@ -2136,6 +2152,14 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.list_move(1),
             KeyCode::Up | KeyCode::Char('k') => self.list_move(-1),
+            KeyCode::Char('d') => {
+                let half = (self.list_viewport / 2).max(1);
+                self.list_move(half as isize);
+            }
+            KeyCode::Char('u') => {
+                let half = (self.list_viewport / 2).max(1);
+                self.list_move(-(half as isize));
+            }
             KeyCode::Char(' ') => self.toggle_selection(),
             KeyCode::PageDown => {
                 let page = self.list_viewport.max(1);
@@ -2180,12 +2204,12 @@ impl App {
             self.handle_speed_read_key(key);
             return;
         }
+        let half = self
+            .reader
+            .as_ref()
+            .map(Reader::half_page_amount)
+            .unwrap_or(10);
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            let half = self
-                .reader
-                .as_ref()
-                .map(Reader::half_page_amount)
-                .unwrap_or(10);
             match key.code {
                 KeyCode::Char('d') => {
                     self.reader_scroll(half as isize);
@@ -2221,6 +2245,8 @@ impl App {
             KeyCode::Char('v') => self.start_highlight_selection(),
             KeyCode::Down | KeyCode::Char('j') => self.reader_scroll(1),
             KeyCode::Up | KeyCode::Char('k') => self.reader_scroll(-1),
+            KeyCode::Char('d') => self.reader_scroll(half as isize),
+            KeyCode::Char('u') => self.reader_scroll(-(half as isize)),
             KeyCode::Char(' ') => {
                 if let Some(reader) = &mut self.reader {
                     reader.scroll_to_next_paragraph();
@@ -7362,6 +7388,22 @@ mod tests {
         let after = app.sidebar_state.selected().unwrap();
         assert!(after != selected);
         assert!(!app.sidebar_items[after].header);
+
+        app.handle_sidebar_key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE,
+        ));
+        let after_plain = app.sidebar_state.selected().unwrap();
+        assert!(after_plain != after);
+        assert!(!app.sidebar_items[after_plain].header);
+
+        app.handle_sidebar_key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::NONE,
+        ));
+        let after_up = app.sidebar_state.selected().unwrap();
+        assert!(after_up != after_plain);
+        assert!(!app.sidebar_items[after_up].header);
     }
 
     #[test]
@@ -7751,10 +7793,22 @@ mod tests {
             KeyModifiers::NONE,
         ));
         assert_eq!(app.list_state.selected(), Some(10));
+
+        app.handle_list_key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.list_state.selected(), Some(15));
+
+        app.handle_list_key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.list_state.selected(), Some(10));
     }
 
     #[test]
-    fn ctrl_d_and_ctrl_u_scroll_half_a_page() {
+    fn d_and_ctrl_d_scroll_half_a_page() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app =
             App::new(Config::default(), PathBuf::from("/tmp/eckly-test"), tx);
@@ -7786,8 +7840,14 @@ mod tests {
         assert_eq!(app.reader.as_ref().unwrap().scroll, 0);
 
         app.handle_reader_key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.reader.as_ref().unwrap().scroll, 5);
+
+        app.handle_reader_key(KeyEvent::new(
             KeyCode::Char('u'),
-            KeyModifiers::CONTROL,
+            KeyModifiers::NONE,
         ));
         assert_eq!(app.reader.as_ref().unwrap().scroll, 0);
     }

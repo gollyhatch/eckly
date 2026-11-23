@@ -113,7 +113,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     };
     let hints = match app.focus {
         crate::app::Focus::Sidebar => {
-            "  j/k move · / filter · Enter apply · R rename label · PgUp/PgDn page · Ctrl+d/u · Tab/Esc back · ? help".to_string()
+            "  j/k move · / filter · Enter apply · R rename label · PgUp/PgDn page · d/u half · Tab/Esc back · ? help".to_string()
         }
         crate::app::Focus::List => {
             if app.filter == crate::models::Filter::Highlights {
