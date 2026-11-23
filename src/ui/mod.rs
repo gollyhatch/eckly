@@ -117,9 +117,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         crate::app::Focus::List => {
             if app.filter == crate::models::Filter::Highlights {
-                format!("  j/k move · Enter open · D delete highlight · PgUp/PgDn page · r refresh · {pane} · ? help")
+                format!("  j/k move · Enter open · D delete highlight · PgUp/PgDn page · r refresh · y url · {pane} · ? help")
             } else {
-                format!("  j/k move · Space select · Enter read · m read · f favorite · a archive · t labels · / search · n add · {pane} · ? help")
+                format!("  j/k move · Space select · Enter read · m read · f favorite · a archive · t labels · / search · n add · y url · {pane} · ? help")
             }
         }
     };

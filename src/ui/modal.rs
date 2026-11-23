@@ -85,6 +85,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         binding("E", "Edit note"),
         binding("D", "Delete selected"),
         binding("o", "Open in browser"),
+        binding("y", "Copy bookmark URL"),
         binding("r", "Refresh"),
         Line::from(Span::styled(
             "a/f/t/m/D apply to selected items.",
@@ -112,6 +113,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         binding("A", "Toggle text alignment"),
         binding("s", "Speed reading (Space, +/- pace)"),
         binding("v", "Highlight text"),
+        binding("y", "URL or selection markdown"),
         binding("H", "Annotations (n, e, c, d)"),
         binding("o", "Open in browser"),
         binding("r", "Retry article"),

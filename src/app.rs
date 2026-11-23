@@ -2213,6 +2213,7 @@ impl App {
                 }
                 KeyCode::Char('D') => self.delete_selected_highlight(),
                 KeyCode::Char('r') => self.refresh_all(),
+                KeyCode::Char('y') => self.copy_bookmark_url(),
                 _ => {}
             }
             return;
@@ -2267,6 +2268,7 @@ impl App {
             KeyCode::Char('r') => self.refresh_all(),
             KeyCode::Char('n') => self.open_new_bookmark(),
             KeyCode::Char('o') => self.open_in_browser(),
+            KeyCode::Char('y') => self.copy_bookmark_url(),
             KeyCode::Char('m') => self.toggle_read(),
             KeyCode::Char('f') => self.toggle_favorite(),
             KeyCode::Char('a') => self.toggle_archive(),
@@ -2374,6 +2376,7 @@ impl App {
                 }
             }
             KeyCode::Char('o') => self.open_in_browser(),
+            KeyCode::Char('y') => self.copy_bookmark_url(),
             KeyCode::Char('t') => self.edit_labels(),
             KeyCode::Char('T') => self.edit_title(),
             KeyCode::Char('E') => self.edit_note(),
@@ -3359,6 +3362,21 @@ impl App {
         }
     }
 
+    fn copy_bookmark_url(&mut self) {
+        let Some(url) = self.current_url() else {
+            self.toast_error("No bookmark URL to copy");
+            return;
+        };
+        if url.trim().is_empty() {
+            self.toast_error("This bookmark has no URL.");
+            return;
+        }
+        match self.copy_to_clipboard(url) {
+            Ok(()) => self.toast_success("Copied bookmark URL"),
+            Err(err) => self.toast_error(format!("Could not copy: {err}")),
+        }
+    }
+
     fn copy_to_clipboard(
         &mut self,
         text: String,
@@ -3372,6 +3390,19 @@ impl App {
             return Err("clipboard unavailable".into());
         };
         clipboard.set_text(text).map_err(|err| err.to_string())
+    }
+
+    fn current_url(&self) -> Option<String> {
+        if let Some(reader) = &self.reader {
+            return Some(reader.bookmark.url.clone());
+        }
+        if self.filter == Filter::Highlights {
+            let index = self.list_state.selected()?;
+            return self.highlights.get(index).map(|item| {
+                item.bookmark_url.clone()
+            });
+        }
+        self.selected_bookmark().map(|bookmark| bookmark.url)
     }
 
     fn create_annotation_span(
@@ -8009,7 +8040,65 @@ let y = 2;</code></pre>"#,
     }
 
     #[test]
-    fn ctrl_d_and_ctrl_u_scroll_list_half_a_page() {
+    fn current_url_follows_the_active_pane() {
+        let mut app = test_app_with_bookmarks(2);
+        app.bookmarks[0].url = "https://example.com/one".into();
+        app.bookmarks[1].url = "https://example.com/two".into();
+
+        app.list_state.select(Some(1));
+        assert_eq!(
+            app.current_url().as_deref(),
+            Some("https://example.com/two")
+        );
+
+        let reader = Reader::new(
+            Bookmark {
+                url: "https://example.com/reader".into(),
+                has_article: true,
+                ..Default::default()
+            },
+            false,
+            0,
+            true,
+        );
+        app.reader = Some(reader);
+        assert_eq!(
+            app.current_url().as_deref(),
+            Some("https://example.com/reader")
+        );
+
+        app.reader = None;
+        app.filter = Filter::Highlights;
+        app.highlights = vec![Annotation {
+            bookmark_url: "https://example.com/highlight".into(),
+            ..Default::default()
+        }];
+        app.list_state.select(Some(0));
+        assert_eq!(
+            app.current_url().as_deref(),
+            Some("https://example.com/highlight")
+        );
+    }
+
+    #[test]
+    fn y_without_a_bookmark_url_reports_an_error() {
+        let mut app = test_app_with_bookmarks(1);
+        app.bookmarks[0].url.clear();
+        app.list_state.select(Some(0));
+
+        app.handle_list_key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+        ));
+
+        assert!(matches!(
+            app.toast.as_ref().map(|toast| toast.kind),
+            Some(ToastKind::Error)
+        ));
+    }
+
+    #[test]
+    fn d_and_ctrl_d_scroll_list_half_a_page() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app =
             App::new(Config::default(), PathBuf::from("/tmp/eckly-test"), tx);

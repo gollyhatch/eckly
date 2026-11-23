@@ -294,6 +294,7 @@ first.
 | `E` | Edit note |
 | `D` | Delete highlighted/selected bookmarks (with confirmation) |
 | `o` | Open the original page in your browser |
+| `y` | Copy the bookmark URL |
 | `/` | Search (empty query clears; `Ctrl+w` deletes the previous word) |
 | `s` / `S` | Cycle sort order forward / backward |
 | `n` | Save a new link |
@@ -366,6 +367,7 @@ progress or archive status.
 | `A` | Toggle centered / left-aligned text |
 | `s` | Speed reading (RSVP) |
 | `v` | Start a highlight selection |
+| `y` | Copy the bookmark URL; in selection mode, copy the Markdown selection |
 | `H` | Annotations (view, add, edit, delete) |
 | `o` | Open in browser |
 | `r` | Retry loading the article |
