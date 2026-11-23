@@ -3416,8 +3416,12 @@ impl App {
         if reader.loading {
             return;
         }
-        let id = reader.bookmark.id.clone();
-        self.request_article(&id);
+        let bookmark = reader.bookmark.clone();
+        if self.load_fresh_cached_article(&bookmark) {
+            self.toast_info("Reloaded cached article");
+            return;
+        }
+        self.request_article(&bookmark.id);
     }
 
     fn close_reader(&mut self) {
@@ -4541,7 +4545,6 @@ impl App {
         if !self.profile_denied {
             self.request_profile();
         }
-        self.toast_info("Refreshing…");
     }
 
     // ------------------------------------------------------------------
