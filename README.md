@@ -29,8 +29,8 @@ order; press `Enter` to jump to one:
   lists every highlight by bookmark, and the reader browses or edits them.
 - **Read** extracted articles in a comfortable, scrollable reader. Readeck's
   Markdown export is reflowed to the terminal width; headings, lists, quotes,
-  code and images are rendered inline. Images use truecolor half blocks and
-  cached resources when available.
+  code and images are rendered inline. Images are drawn with `ratatui-image`,
+  using half blocks by default and a terminal graphics protocol when enabled.
 - **Manage** bookmarks: mark read/unread, favorite, archive, edit labels,
   title, and short notes, or delete with a confirmation.
 - **Bulk edit** a selection: press `Space` to select bookmarks, then apply
@@ -102,12 +102,12 @@ This setting only affects opening links, not OAuth login URLs.
 `images` controls whether inline article images are rendered; it defaults to
 `true`. Pressing `i` in the reader toggles images for the current session.
 
-`terminal_graphics` (experimental, default `false`) draws images at full
-resolution in terminals with a graphics protocol. At startup eckly asks the
-terminal what it supports and uses the Kitty protocol (kitty, Ghostty), Sixel
-(foot, xterm, Windows Terminal) or iTerm2 (iTerm2, WezTerm), and falls back to
-half blocks otherwise. Images keep their natural size, shrunk to fit the
-reading column. Inside tmux, the Kitty protocol needs
+`terminal_graphics` (experimental, default `false`) makes `ratatui-image` use a
+full-resolution terminal graphics protocol instead of half blocks. At startup
+eckly asks the terminal what it supports and uses the Kitty protocol (kitty,
+Ghostty), Sixel (foot, xterm, Windows Terminal) or iTerm2 (iTerm2, WezTerm), and
+falls back to half blocks otherwise. Images keep their natural size, shrunk to
+fit the reading column. Inside tmux, the Kitty protocol needs
 `set -g allow-passthrough on`.
 
 `text_width` sets the maximum width of the reading column before text wraps.
@@ -429,11 +429,11 @@ Text entry fields (search, labels, title, note, new bookmark and setup) support:
 
 ## Notes and limitations
 
-- Images are rendered as truecolor half blocks unless `terminal_graphics` is
-  on. Terminals without truecolor will approximate the colors, and animated
-  images show their first frame. Up to 12 images are loaded per article.
-  Embedded videos and complex tables are flattened; `o` opens the original
-  page when needed.
+- Images are drawn with `ratatui-image`, using truecolor half blocks unless
+  `terminal_graphics` is on. Terminals without truecolor will approximate the
+  colors, and animated images show their first frame. Up to 12 images are
+  loaded per article. Embedded videos and complex tables are flattened; `o`
+  opens the original page when needed.
 - Notes are edited on a single line. Notes containing multiple lines should be
   edited in the Readeck web UI to avoid flattening them.
 - Label names containing commas cannot be entered from the TUI.

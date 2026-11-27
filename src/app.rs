@@ -166,7 +166,7 @@ pub struct Reader {
     pub html_article: Option<Article>,
     /// Text selection in progress.
     pub selection: Option<Selection>,
-    /// Set when `terminal_graphics` is on.
+    /// Protocol used to render inline images.
     pub graphics: Option<Picker>,
     graphics_encoded: HashMap<String, Graphic>,
     graphics_encoding: HashSet<(String, usize)>,
@@ -1425,7 +1425,8 @@ pub struct App {
     pub tick: u64,
     pub quit: bool,
     pub images_enabled: bool,
-    /// Detected at startup when `terminal_graphics` is on.
+    /// Image protocol picker: half blocks by default, detected protocol when
+    /// `terminal_graphics` is enabled.
     pub picker: Option<Picker>,
     pub offline: bool,
     pub offline_mode: bool,
@@ -3423,8 +3424,8 @@ impl App {
         }
     }
 
-    /// Encode loaded images for the terminal graphics protocol in the
-    /// background, at the reader's current column width.
+    /// Encode loaded images for ratatui-image in the background, at the
+    /// reader's current column width.
     pub fn spawn_image_encodes(&mut self) {
         let Some(reader) = &mut self.reader else {
             return;

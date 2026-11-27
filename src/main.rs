@@ -148,7 +148,11 @@ async fn main() -> Result<()> {
 
     // Detection reads the terminal's replies from stdin, so it has to finish
     // before the input thread starts.
-    let picker = config.terminal_graphics.then(graphics::detect);
+    let picker = if config.terminal_graphics {
+        graphics::detect()
+    } else {
+        ratatui_image::picker::Picker::halfblocks()
+    };
 
     let (tx, rx) = mpsc::unbounded_channel();
     event::spawn_input_thread(tx.clone());
@@ -162,7 +166,7 @@ async fn main() -> Result<()> {
     };
 
     let mut app = App::with_cache(config, config_path, tx, cache, cli.offline);
-    app.picker = picker;
+    app.picker = Some(picker);
     app.bootstrap();
 
     let mut terminal = ratatui::init();
